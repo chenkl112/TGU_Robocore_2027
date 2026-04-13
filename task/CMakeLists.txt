@@ -1,5 +1,4 @@
-add_executable(test test.cpp)
+add_executable(read_toml test/read_toml.cpp)
+add_executable(serial_test test/test_serial.cpp)
 
-target_link_libraries(test
-        tomlpp
-)
+target_link_libraries(serial_test PRIVATE io tools)
