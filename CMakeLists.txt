@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_BUILD_TYPE Debug)
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
 find_package(Boost CONFIG REQUIRED)
 find_package(OpenCV REQUIRED)
 #find_package(Eigen3 REQUIRED)
