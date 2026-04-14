@@ -18,8 +18,8 @@
 - 控制台 + 文件输出
 - 多线程安全
 - 模块化日志
-详细使用示例见 `task/test/test_logger.cpp`，此处仅做简单介绍：
 
+详细使用示例见 `task/test/test_logger.cpp`，此处仅做简单介绍：
 #### 1. 日志系统的初始化
 
 ```cpp
