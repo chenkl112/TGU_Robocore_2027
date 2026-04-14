@@ -34,7 +34,7 @@ int main() {
             LOG_WARN("main","CRC校验失败");
             return;
         }
-        LOG_INFO("main", std::to_string(pkt.data));
+        LOG_INFO("main", "{}", pkt.data);
     });
 
     while (true) {

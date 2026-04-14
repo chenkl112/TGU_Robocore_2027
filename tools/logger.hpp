@@ -10,6 +10,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <format>
 
 namespace tools {
 
@@ -62,22 +63,32 @@ namespace tools {
 } // namespace tools
 
 
+#define LOG_INFO(module, fmt, ...) \
+::tools::Logger::instance().log( \
+::tools::LogLevel::Info, module, \
+std::format(fmt __VA_OPT__(,) __VA_ARGS__), \
+__FILE__, __LINE__)
+
 #ifdef NDEBUG
-// Release
-#define LOG_DEBUG(module, msg) ((void)0)
+#define LOG_DEBUG(module, fmt, ...) ((void)0)
 #else
-// Debug
-#define LOG_DEBUG(module, msg) \
-::tools::Logger::instance().log(::tools::LogLevel::Debug, module, msg, __FILE__, __LINE__)
+#define LOG_DEBUG(module, fmt, ...) \
+::tools::Logger::instance().log( \
+::tools::LogLevel::Debug, module, \
+std::format(fmt __VA_OPT__(,) __VA_ARGS__), \
+__FILE__, __LINE__)
 #endif
 
-#define LOG_INFO(module, msg) \
-::tools::Logger::instance().log(::tools::LogLevel::Info, module, msg, __FILE__, __LINE__)
+#define LOG_WARN(module, fmt, ...) \
+::tools::Logger::instance().log( \
+::tools::LogLevel::Warn, module, \
+std::format(fmt __VA_OPT__(,) __VA_ARGS__), \
+__FILE__, __LINE__)
 
-#define LOG_WARN(module, msg) \
-::tools::Logger::instance().log(::tools::LogLevel::Warn, module, msg, __FILE__, __LINE__)
-
-#define LOG_ERROR(module, msg) \
-::tools::Logger::instance().log(::tools::LogLevel::Error, module, msg, __FILE__, __LINE__)
+#define LOG_ERROR(module, fmt, ...) \
+::tools::Logger::instance().log( \
+::tools::LogLevel::Error, module, \
+std::format(fmt __VA_OPT__(,) __VA_ARGS__), \
+__FILE__, __LINE__)
 
 #endif //TGU_ROBOCORE_2027_LOGGER_HPP

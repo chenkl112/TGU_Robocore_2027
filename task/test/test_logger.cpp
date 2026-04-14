@@ -13,11 +13,15 @@ int main() {
     };
 
     tools::Logger::instance().init(cfg);
+    static constexpr const char* MODULE = "TEST";
 
-    LOG_INFO("TEST_INFO", "LOG_INFO");
-    LOG_DEBUG("TEST_DEBUG", "LOG_DEBUG");
-    LOG_WARN("TEST_WARN", "LOG_WARN");
-    LOG_ERROR("TEST_ERROR", "LOG_ERROR");
+    int a = 114514;
+    float b = 1919810.123;
+
+    LOG_INFO(MODULE, "LOG_INFO: {}", a);
+    LOG_DEBUG(MODULE, "LOG_DEBUG: {}", a);
+    LOG_WARN(MODULE, "LOG_WARN: {}", b);
+    LOG_ERROR(MODULE, "LOG_ERROR: {}", b);
 
     return 0;
 }

@@ -32,11 +32,11 @@ namespace io {
                 boost::asio::serial_port_base::flow_control::none));
 
             is_open_ = true;
-            LOG_INFO("serial", device + " open success");
+            LOG_INFO("serial", "{} open success", device);
             return true;
 
         } catch (std::exception& e) {
-            LOG_ERROR("serial",device + " open failed: " + e.what());
+            LOG_ERROR("serial","{} open failed: {}", device, e.what());
             is_open_ = false;
             return false;
         }
