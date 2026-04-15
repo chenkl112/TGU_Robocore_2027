@@ -13,7 +13,7 @@ int main() {
     };
 
     tools::Logger::instance().init(cfg);
-    static constexpr const char* MODULE = "TEST";
+    static constexpr const char *MODULE = "TEST";
 
     int a = 114514;
     float b = 1919.810;

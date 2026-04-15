@@ -7,8 +7,7 @@
 #include <optional>
 #include <utility>
 
-#include <foxglove/server.hpp>
-
+#include "foxglove/server.hpp"
 #include "tools/logger.hpp"
 
 namespace tools {
