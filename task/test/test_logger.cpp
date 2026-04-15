@@ -16,7 +16,7 @@ int main() {
     static constexpr const char* MODULE = "TEST";
 
     int a = 114514;
-    float b = 1919810.123;
+    float b = 1919.810;
 
     LOG_INFO(MODULE, "LOG_INFO: {}", a);
     LOG_DEBUG(MODULE, "LOG_DEBUG: {}", a);
