@@ -1,0 +1,1 @@
+git ls-files . ':!build/' ':!tools/foxglove/' ':!tools/tomlpp.hpp' ':!*.md' ':!*.txt' ':!*.toml' | xargs wc -l
