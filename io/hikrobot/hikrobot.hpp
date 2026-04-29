@@ -1,0 +1,10 @@
+//
+// Created by tgu on 2026/4/16.
+//
+
+#ifndef TGU_ROBOCORE_2027_HIKROBOT_HPP
+#define TGU_ROBOCORE_2027_HIKROBOT_HPP
+
+
+
+#endif //TGU_ROBOCORE_2027_HIKROBOT_HPP

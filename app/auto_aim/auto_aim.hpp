@@ -1,0 +1,8 @@
+//
+// Created by tgu on 2026/4/29.
+//
+
+#ifndef TGU_ROBOCORE_2027_AUTO_AIM_HPP
+#define TGU_ROBOCORE_2027_AUTO_AIM_HPP
+
+#endif //TGU_ROBOCORE_2027_AUTO_AIM_HPP
