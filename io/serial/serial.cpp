@@ -49,7 +49,7 @@ namespace io {
         is_open_ = false;
     }
 
-    bool Serial::isOpen() const {
+    bool Serial::is_open() const {
         return is_open_;
     }
 
@@ -64,7 +64,7 @@ namespace io {
         }
     }
 
-    void Serial::spinOnce() {
+    void Serial::spin_once() {
         if (!is_open_) return;
 
         try {

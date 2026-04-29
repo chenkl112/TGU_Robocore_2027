@@ -39,7 +39,7 @@ int main() {
     });
 
     while (true) {
-        serial.spinOnce();
+        serial.spin_once();
         sendpkg.data++;
         serial.send(sendpkg);
     }

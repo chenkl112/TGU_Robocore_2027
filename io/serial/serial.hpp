@@ -103,7 +103,7 @@ public:
 
     bool open(const std::string& device, int baudrate);
     void close();
-    bool isOpen() const;
+    bool is_open() const;
 
     size_t write(const uint8_t* data, size_t size);
 
@@ -127,7 +127,7 @@ public:
         callbacks_.push_back(wrapper);
     }
 
-    void spinOnce();
+    void spin_once();
 
 private:
     boost::asio::io_context io_;
