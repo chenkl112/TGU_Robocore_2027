@@ -30,7 +30,7 @@ Solver::Solver(const std::string& config_path)
     : R_gimbal2world_(Eigen::Matrix3d::Identity()) {
     auto config = toml::parse_file(config_path);
 
-    auto read_matrix_3x3 = [&](const char* key) {
+    auto read_matrix_3x3 = [&](const char* key) -> Eigen::Matrix3d {
         auto data = config["camera"][key].as_array();
         if (!data || data->size() < 9) {
             LOG_WARN(MODULE, "Missing or invalid config key: {}", key);
@@ -42,7 +42,7 @@ Solver::Solver(const std::string& config_path)
         return m;
     };
 
-    auto read_vector_3 = [&](const char* key) {
+    auto read_vector_3 = [&](const char* key) -> Eigen::Vector3d {
         auto data = config["camera"][key].as_array();
         if (!data || data->size() < 3) {
             LOG_WARN(MODULE, "Missing or invalid config key: {}", key);

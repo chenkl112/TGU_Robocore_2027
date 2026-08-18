@@ -1,6 +1,7 @@
 .idea/
 .cache/
 .github/
+.venv-openvino/
 
 tmp/
 build/

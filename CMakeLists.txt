@@ -14,6 +14,22 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 find_package(Boost CONFIG REQUIRED COMPONENTS system)
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
+
+# Prefer the project-local Python OpenVINO installation created by the README
+# setup commands. A system installation or an explicit -DOpenVINO_DIR still
+# takes precedence.
+if(NOT OpenVINO_DIR)
+    file(GLOB OPENVINO_VENV_CMAKE_DIRS LIST_DIRECTORIES true
+        "${PROJECT_SOURCE_DIR}/.venv-openvino/lib/python*/site-packages/openvino/cmake"
+    )
+    list(LENGTH OPENVINO_VENV_CMAKE_DIRS OPENVINO_VENV_CMAKE_DIR_COUNT)
+    if(OPENVINO_VENV_CMAKE_DIR_COUNT EQUAL 1)
+        list(GET OPENVINO_VENV_CMAKE_DIRS 0 OPENVINO_VENV_CMAKE_DIR)
+        set(OpenVINO_DIR "${OPENVINO_VENV_CMAKE_DIR}" CACHE PATH
+            "Path to the project-local OpenVINO CMake package"
+        )
+    endif()
+endif()
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 find_package(Threads REQUIRED)
 

@@ -21,5 +21,6 @@ target_link_libraries(tools PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/foxglove/lib/libfoxglove.a
     ${OpenCV_LIBS}
     Boost::boost
+    Eigen3::Eigen
     Threads::Threads
 )

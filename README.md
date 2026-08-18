@@ -42,18 +42,29 @@ For the dependencies available from Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y cmake g++ libboost-all-dev libopencv-dev \
+sudo apt install -y build-essential cmake ninja-build g++ \
+  python3-venv python3-pip libboost-all-dev libopencv-dev \
   libeigen3-dev libaravis-dev aravis-tools aravis-tools-cli \
   libusb-1.0-0-dev
 ```
 
-Install OpenVINO Runtime and its CMake development files using Intel's official
-OpenVINO installation instructions before configuring this project.
+Install the pinned OpenVINO build in a project-local virtual environment. The
+2026.3 wheel uses the same libstdc++ ABI as Ubuntu 24.04's OpenCV packages and
+can load the checked-in OpenVINO 2024 IR model.
+
+```bash
+python3 -m venv .venv-openvino
+.venv-openvino/bin/python -m pip install -r requirements-openvino.txt
+```
+
+CMake automatically discovers this local installation. To use an official
+system installation instead, pass its package directory explicitly with
+`-DOpenVINO_DIR=/path/to/openvino/cmake`.
 
 ### Build
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 

@@ -5,7 +5,11 @@
 #include <list>
 #include <opencv2/opencv.hpp>
 #include <openvino/openvino.hpp>
+#if __has_include(<openvino/core/preprocess/pre_post_process.hpp>)
+#include <openvino/core/preprocess/pre_post_process.hpp>
+#else
 #include <openvino/preprocess/pre_post_process.hpp>
+#endif
 #include <string>
 #include <vector>
 

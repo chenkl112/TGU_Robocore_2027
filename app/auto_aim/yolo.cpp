@@ -13,7 +13,7 @@ namespace app::auto_aim {
 
 YOLO::YOLO(const std::string& config_path, bool debug) {
     auto config = toml::parse_file(config_path);
-    auto yolo_name = config["yolo"]["yolo_name"].value_or("yolov8");
+    std::string yolo_name = config["yolo"]["yolo_name"].value_or("yolov8");
 
     if (yolo_name == "yolov8") {
         yolo_ = std::make_unique<YOLOV8>(config_path, debug);
