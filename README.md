@@ -1,5 +1,7 @@
 # TGU Robocore 2027
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 ## Armor auto-aim v0.1
 
 This branch provides the first Robocore-integrated armor auto-aim baseline for
