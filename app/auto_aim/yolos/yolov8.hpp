@@ -1,0 +1,58 @@
+#ifndef TGU_ROBOCORE_2027_YOLOV8_HPP
+#define TGU_ROBOCORE_2027_YOLOV8_HPP
+#pragma once
+
+#include <list>
+#include <opencv2/opencv.hpp>
+#include <openvino/openvino.hpp>
+#include <openvino/preprocess/pre_post_process.hpp>
+#include <string>
+#include <vector>
+
+#include "armor.hpp"
+#include "classifier.hpp"
+#include "yolo.hpp"
+
+namespace app::auto_aim {
+
+class YOLOV8 : public YOLOBase {
+public:
+    YOLOV8(const std::string& config_path, bool debug);
+
+    std::list<Armor> detect(const cv::Mat& bgr_img, int frame_count) override;
+
+    std::list<Armor> postprocess(
+        double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count) override;
+
+private:
+    Classifier classifier_;
+
+    std::string device_, model_path_;
+    bool debug_, use_roi_;
+
+    const int class_num_ = 2;
+    const float nms_threshold_ = 0.3;
+    const float score_threshold_ = 0.7;
+    double min_confidence_;
+
+    ov::Core core_;
+    ov::CompiledModel compiled_model_;
+
+    cv::Rect roi_;
+    cv::Point2f offset_;
+
+    bool check_name(const Armor& armor) const;
+    bool check_type(const Armor& armor) const;
+    cv::Mat get_pattern(const cv::Mat& bgr_img, const Armor& armor) const;
+    ArmorType get_type(const Armor& armor);
+    cv::Point2f get_center_norm(const cv::Mat& bgr_img, const cv::Point2f& center) const;
+    std::list<Armor> parse(
+        double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count);
+    void draw_detections(
+        const cv::Mat& img, const std::list<Armor>& armors, int frame_count) const;
+    void sort_keypoints(std::vector<cv::Point2f>& keypoints);
+};
+
+}  // namespace app::auto_aim
+
+#endif  // TGU_ROBOCORE_2027_YOLOV8_HPP

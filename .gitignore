@@ -4,6 +4,7 @@
 
 tmp/
 build/
+patterns/
 
-*.txt
+CMakeCache.txt
 *.log

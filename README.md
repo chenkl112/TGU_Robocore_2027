@@ -1,21 +1,102 @@
-# TGU_Robocore_2027
+# TGU Robocore 2027
 
-## 概述
-本项目旨在为TGURM304提供一个完善可用的RM自瞄/导航框架
+## Armor auto-aim v0.1
 
----
+This branch provides the first Robocore-integrated armor auto-aim baseline for
+alliance matches. It detects and tracks robot armor only. Outpost, base and
+energy-mechanism targets are outside the v0.1 scope.
+
+The armor pipeline is:
+
+```text
+USB camera -> YOLOv8 -> armor classifier -> PnP/yaw optimization
+           -> tracker/EKF -> ballistic/MPC planner -> gimbal command
+```
+
+The implementation is adapted from TongjiSuperPower `sp_vision_25`. Its MIT
+license is retained in `LICENSES/sp_vision_25-MIT.txt`.
+
+### v0.1 scope
+
+- YOLOv8 armor detection with OpenVINO.
+- Robot targets: hero, engineer, infantry and sentry.
+- PnP pose solving and armor yaw optimization.
+- Whole-vehicle EKF tracking and MPC command planning.
+- Existing Robocore serial, logger, TOML and Foxglove infrastructure retained.
+- No outpost targeting and no energy-mechanism algorithm.
+- Automatic fire is disabled by default and additionally gated by measured
+  gimbal yaw/pitch error when enabled.
+
+### Dependencies
+
+- Ubuntu 24.04 or a distribution providing GCC 13+
+- CMake 3.16+
+- C++20 compiler with `std::format` support (GCC 13+ recommended)
+- Boost.System
+- OpenCV
+- Eigen3
+- OpenVINO Runtime development package
+- Aravis 0.8
+
+For the dependencies available from Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install libboost-all-dev
-sudo apt install libopencv-dev
-sudo apt install libaravis-dev aravis-tools
-sudo apt install aravis-tools-cli
-sudo apt install libusb-1.0-0-dev
+sudo apt install -y cmake g++ libboost-all-dev libopencv-dev \
+  libeigen3-dev libaravis-dev aravis-tools aravis-tools-cli \
+  libusb-1.0-0-dev
 ```
 
-```
-sudo nano /etc/udev/rules.d/99-hikrobot.rules
+Install OpenVINO Runtime and its CMake development files using Intel's official
+OpenVINO installation instructions before configuring this project.
 
+### Build
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+### Run
+
+Review `config/auto_aim.toml` first. The checked-in calibration is a migration
+reference and must be replaced with calibration from the actual camera/gimbal
+pair.
+
+```bash
+./build/auto_aim_sentry config/auto_aim.toml
+```
+
+Offline replay:
+
+```bash
+./build/auto_aim_test --config-path=config/auto_aim.toml assets/demo/demo
+```
+
+Replay video and pose text are not bundled in v0.1.
+
+### Safety and limitations
+
+- `[fire].enabled` defaults to `false`. Enable it only after verifying the
+  serial protocol, coordinate convention and calibration on a test rig.
+- Camera source, requested resolution and frame rate are configured under
+  `[camera]` in `config/auto_aim.toml`.
+- YOLOv5 and YOLO11 are not included in v0.1; YOLOv8 is the only selectable
+  detector backend.
+- Entering a buff mode does not run a buff detector; the program sends a
+  disabled control command instead.
+
+See `app/auto_aim/README.md` for module boundaries and validation targets, and
+`docs/auto_aim_v0.1_review.md` for the Chinese review, known risks and roadmap.
+
+### Existing Hikrobot USB rule
+
+The original framework's Hikrobot camera test may require:
+
+```bash
+sudo tee /etc/udev/rules.d/99-hikrobot.rules <<'EOF'
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2bdf", ATTRS{idProduct}=="0001", MODE="0666"
+EOF
+sudo udevadm control --reload-rules
+sudo udevadm trigger
 ```
