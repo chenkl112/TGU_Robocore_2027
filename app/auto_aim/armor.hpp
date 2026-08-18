@@ -33,6 +33,53 @@ static_assert(!is_robot_target(ArmorName::not_armor));
 
 enum ArmorPriority { first = 1, second, third, forth, fifth };
 
+enum class PriorityMode { mode_one = 1, mode_two };
+
+constexpr ArmorPriority armor_priority(ArmorName name, PriorityMode mode) {
+    if (mode == PriorityMode::mode_two) {
+        switch (name) {
+            case ArmorName::two:
+                return ArmorPriority::first;
+            case ArmorName::one:
+            case ArmorName::three:
+            case ArmorName::four:
+            case ArmorName::five:
+                return ArmorPriority::second;
+            case ArmorName::sentry:
+            case ArmorName::outpost:
+            case ArmorName::base:
+            case ArmorName::not_armor:
+                return ArmorPriority::third;
+        }
+    }
+
+    switch (name) {
+        case ArmorName::three:
+        case ArmorName::four:
+            return ArmorPriority::first;
+        case ArmorName::one:
+            return ArmorPriority::second;
+        case ArmorName::five:
+        case ArmorName::sentry:
+            return ArmorPriority::third;
+        case ArmorName::two:
+            return ArmorPriority::forth;
+        case ArmorName::outpost:
+        case ArmorName::base:
+        case ArmorName::not_armor:
+            return ArmorPriority::fifth;
+    }
+
+    return ArmorPriority::fifth;
+}
+
+static_assert(
+    armor_priority(ArmorName::three, PriorityMode::mode_one) == ArmorPriority::first);
+static_assert(
+    armor_priority(ArmorName::two, PriorityMode::mode_one) == ArmorPriority::forth);
+static_assert(
+    armor_priority(ArmorName::two, PriorityMode::mode_two) == ArmorPriority::first);
+
 struct Lightbar {
     std::size_t id;
     Color color = Color::blue;

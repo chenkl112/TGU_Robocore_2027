@@ -1,16 +1,17 @@
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <exception>
+#include <list>
 #include <opencv2/opencv.hpp>
-#include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <variant>
 
+#include "app/auto_aim/aimer.hpp"
 #include "app/auto_aim/multithread/mt_yolo.hpp"
-#include "app/auto_aim/planner/planner.hpp"
+#include "app/auto_aim/shooter.hpp"
 #include "app/auto_aim/solver.hpp"
 #include "app/auto_aim/target.hpp"
 #include "app/auto_aim/tracker.hpp"
@@ -18,11 +19,10 @@
 #include "io/gimbal/gimbal.hpp"
 #include "io/usbcamera/usbcamera.hpp"
 #include "tools/logger.hpp"
-#include "tools/math_tools.hpp"
 #include "tools/thread_safe_queue.hpp"
 #include "tools/tomlpp.hpp"
 
-static constexpr const char* MODULE = "SENTRY_MPC";
+static constexpr const char* MODULE = "AUTO_AIM_SENTRY";
 
 const std::string keys =
     "{help h usage ? |                       | 输出命令行参数说明 }"
@@ -38,11 +38,6 @@ int run(int argc, char* argv[]) {
     }
     auto config_path = cli.get<std::string>("@config-path");
     auto config = toml::parse_file(config_path);
-    const bool auto_fire_enabled = config["fire"]["enabled"].value_or(false);
-    const double fire_yaw_tolerance =
-        config["fire"]["yaw_tolerance_deg"].value_or(1.0) / 57.3;
-    const double fire_pitch_tolerance =
-        config["fire"]["pitch_tolerance_deg"].value_or(1.0) / 57.3;
     std::variant<int, std::string> camera_source{0};
     if (auto index = config["camera"]["source"].value<int64_t>()) {
         camera_source = static_cast<int>(*index);
@@ -59,10 +54,13 @@ int run(int argc, char* argv[]) {
     app::auto_aim::MultiThreadYOLO mt_yolo(config_path);
     app::auto_aim::Solver solver(config_path);
     app::auto_aim::Tracker tracker(config_path, solver);
-    app::auto_aim::Planner planner(config_path);
+    app::auto_aim::Aimer aimer(config_path);
+    app::auto_aim::Shooter shooter(config_path);
 
-    tools::ThreadSafeQueue<std::optional<app::auto_aim::Target>, true> target_queue(1);
-    target_queue.push(std::nullopt);
+    using TimedTargets = std::pair<
+        std::list<app::auto_aim::Target>, std::chrono::steady_clock::time_point>;
+    tools::ThreadSafeQueue<TimedTargets, true> target_queue(1);
+    target_queue.push({{}, std::chrono::steady_clock::now()});
 
     std::atomic<bool> quit{false};
 
@@ -99,14 +97,11 @@ int run(int argc, char* argv[]) {
             solver.set_R_gimbal2world(q);
 
             auto targets = tracker.track(armors, t);
-            if (!targets.empty())
-                target_queue.push(targets.front());
-            else
-                target_queue.push(std::nullopt);
+            target_queue.push({std::move(targets), t});
         }
     });
 
-    // ===== 线程 3:Planner → Gimbal =====
+    // ===== 线程 3:Aimer/Shooter → Gimbal =====
     auto plan_thread = std::thread([&]() {
         while (!quit) {
             if (gimbal.mode() != io::GimbalMode::AUTO_AIM) {
@@ -119,18 +114,15 @@ int run(int argc, char* argv[]) {
                 continue;
             }
 
-            auto target = target_queue.front();
+            auto [targets, timestamp] = target_queue.front();
             auto gs = gimbal.state();
-            auto plan = planner.plan(target, gs.bullet_speed);
-
-            const bool gimbal_aligned =
-                std::abs(tools::limit_rad(plan.target_yaw - gs.yaw)) < fire_yaw_tolerance &&
-                std::abs(plan.target_pitch - gs.pitch) < fire_pitch_tolerance;
-            plan.fire = auto_fire_enabled && plan.fire && gimbal_aligned;
+            auto command = aimer.aim(targets, timestamp, gs.bullet_speed);
+            const Eigen::Vector3d gimbal_position{gs.yaw, gs.pitch, 0.0};
+            command.shoot = shooter.shoot(command, aimer, targets, gimbal_position);
 
             gimbal.send(
-                plan.control, plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc,
-                plan.pitch, plan.pitch_vel, plan.pitch_acc);
+                command.control, command.shoot, command.yaw, 0.0F, 0.0F,
+                command.pitch, 0.0F, 0.0F);
 
             std::this_thread::sleep_for(10ms);
         }

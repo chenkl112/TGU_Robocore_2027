@@ -2,10 +2,11 @@
 #define TGU_ROBOCORE_2027_AUTO_AIM_HPP
 #pragma once
 
+#include "aimer.hpp"
 #include "armor.hpp"
 #include "classifier.hpp"
 #include "detector.hpp"
-#include "planner/planner.hpp"
+#include "shooter.hpp"
 #include "solver.hpp"
 #include "target.hpp"
 #include "tracker.hpp"

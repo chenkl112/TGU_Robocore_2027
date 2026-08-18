@@ -12,7 +12,8 @@ The armor pipeline is:
 
 ```text
 USB camera -> YOLOv8 -> armor classifier -> PnP/yaw optimization
-           -> tracker/EKF -> ballistic/MPC planner -> gimbal command
+           -> tracker/EKF -> Aimer ballistics -> Shooter fire decision
+           -> gimbal command
 ```
 
 The implementation is adapted from TongjiSuperPower `sp_vision_25`. Its MIT
@@ -23,11 +24,15 @@ license is retained in `LICENSES/sp_vision_25-MIT.txt`.
 - YOLOv8 armor detection with OpenVINO.
 - Robot targets: hero, engineer, infantry and sentry.
 - PnP pose solving and armor yaw optimization.
-- Whole-vehicle EKF tracking and MPC command planning.
+- Whole-vehicle EKF tracking, the original Aimer ballistics and Shooter fire
+  decision logic.
+- Both original `sp_vision_25` robot-priority modes and higher-priority target
+  switching.
 - Existing Robocore serial, logger, TOML and Foxglove infrastructure retained.
 - No outpost targeting and no energy-mechanism algorithm.
-- Automatic fire is disabled by default and additionally gated by measured
-  gimbal yaw/pitch error when enabled.
+- Automatic fire is disabled by default. When enabled, the original Shooter
+  checks command stability, measured gimbal yaw error and distance-dependent
+  tolerances.
 
 ### Dependencies
 
@@ -90,10 +95,12 @@ Replay video and pose text are not bundled in v0.1.
 
 ### Safety and limitations
 
-- `[fire].enabled` defaults to `false`. Enable it only after verifying the
+- `[shooter].auto_fire` defaults to `false`. Enable it only after verifying the
   serial protocol, coordinate convention and calibration on a test rig.
 - Camera source, requested resolution and frame rate are configured under
   `[camera]` in `config/auto_aim.toml`.
+- Select the original robot-priority strategy with `[tracker].priority_mode`:
+  mode 1 prioritizes robots 3/4, while mode 2 prioritizes robot 2.
 - YOLOv5 and YOLO11 are not included in v0.1; YOLOv8 is the only selectable
   detector backend.
 - Entering a buff mode does not run a buff detector; the program sends a

@@ -65,28 +65,26 @@ roi_height = -1
 
 [tracker]
 enemy_color = "blue"
+# 原版优先级模式：1 = 3/4 > 1 > 5/哨兵 > 2；2 = 2 > 1/3/4/5 > 哨兵。
+priority_mode = 1
 min_detect_count = 5
 max_temp_lost_count = 25
 
-[planner]
+[aimer]
 yaw_offset = -0.8
 pitch_offset = -1.0
-fire_thresh = 0.003
+coming_angle = 60.0
+leaving_angle = 20.0
 decision_speed = 10.0
 high_speed_delay_time = 0.026
 low_speed_delay_time = 0.010
-max_yaw_acc = 50.0
-Q_yaw = [9000000.0, 0.0]
-R_yaw = [1.0]
-max_pitch_acc = 100.0
-Q_pitch = [9000000.0, 0.0]
-R_pitch = [1.0]
 
-[fire]
-# Keep disabled until serial direction, calibration and gimbal feedback are verified on a test rig.
-enabled = false
-yaw_tolerance_deg = 1.0
-pitch_tolerance_deg = 1.0
+[shooter]
+first_tolerance = 5.0
+second_tolerance = 2.0
+judge_distance = 3.0
+# 上车完成协议、坐标系和标定验证前必须保持关闭。
+auto_fire = false
 
 [gimbal]
 com_port = "/dev/ttyUSB0"

@@ -12,6 +12,7 @@ namespace app::auto_aim {
 
 Tracker::Tracker(const std::string& config_path, Solver& solver)
     : solver_{solver},
+      priority_mode_{PriorityMode::mode_one},
       detect_count_(0),
       temp_lost_count_(0),
       state_{"lost"},
@@ -21,6 +22,12 @@ Tracker::Tracker(const std::string& config_path, Solver& solver)
 
     auto enemy_color_str = config["tracker"]["enemy_color"].value_or("blue");
     enemy_color_ = (enemy_color_str == "red") ? Color::red : Color::blue;
+    const int priority_mode = config["tracker"]["priority_mode"].value_or(1);
+    if (priority_mode == static_cast<int>(PriorityMode::mode_two)) {
+        priority_mode_ = PriorityMode::mode_two;
+    } else if (priority_mode != static_cast<int>(PriorityMode::mode_one)) {
+        LOG_WARN(MODULE, "Invalid priority_mode {}, using mode 1", priority_mode);
+    }
     min_detect_count_ = config["tracker"]["min_detect_count"].value_or(3);
     max_temp_lost_count_ = config["tracker"]["max_temp_lost_count"].value_or(10);
     normal_temp_lost_count_ = max_temp_lost_count_;
@@ -45,6 +52,10 @@ std::list<Target> Tracker::track(
     }
     armors.remove_if([](const Armor& armor) { return !is_robot_target(armor.name); });
 
+    for (auto& armor : armors) {
+        armor.priority = armor_priority(armor.name, priority_mode_);
+    }
+
     armors.sort([](const Armor& a, const Armor& b) {
         auto distance_1 = cv::norm(a.center_norm - cv::Point2f(0.5F, 0.5F));
         auto distance_2 = cv::norm(b.center_norm - cv::Point2f(0.5F, 0.5F));
@@ -58,6 +69,15 @@ std::list<Target> Tracker::track(
     bool found;
     if (state_ == "lost") {
         found = set_target(armors, t);
+    } else if (
+        state_ == "tracking" && !armors.empty() &&
+        armors.front().priority < target_.priority) {
+        found = set_target(armors, t);
+        if (found) {
+            LOG_INFO(
+                MODULE, "Switch to higher-priority target {}",
+                ARMOR_NAMES[armors.front().name]);
+        }
     } else {
         found = update_target(armors, t);
     }
