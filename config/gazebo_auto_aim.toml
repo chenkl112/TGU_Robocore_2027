@@ -95,11 +95,10 @@ auto_fire = true
 [simulation]
 host = "127.0.0.1"
 port = 5800
-fire_interval = 0.30
-# 实际反馈与 MPC 输出都进入此门限，并连续稳定若干帧后才允许开火。
+fire_interval = 0.10
+# 直接采用同济 Planner/TinyMPC 的 plan.fire；只做单帧枪管到位确认和射频限制。
 max_fire_yaw_error = 0.012
 max_fire_pitch_error = 0.012
-min_stable_lock_frames = 5
 # 识别小窗完全由 Robocore 根据 YOLO、PnP、Tracker/EKF 与 Planner 输出绘制。
 show_recognition_window = true
 save_recognition_preview = true

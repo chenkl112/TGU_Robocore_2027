@@ -147,7 +147,7 @@ public:
         const cv::Mat& image, const std::vector<DebugDetection>& detections,
         const std::list<app::auto_aim::Target>& targets, app::auto_aim::Solver& solver,
         const app::auto_aim::Planner& planner, const app::auto_aim::Plan& plan,
-        const std::string& tracker_state, bool target_locked, bool fire,
+        const std::string& tracker_state, bool mpc_control, bool target_locked, bool fire,
         const FrameHeader& frame, double inference_ms, std::uint64_t frame_count) {
         cv::Mat view = image.clone();
         if (view.empty()) return;
@@ -184,7 +184,7 @@ public:
                     view, points, true, cv::Scalar(255, 120, 20), 2, cv::LINE_AA);
             }
 
-            if (plan.control && planner.debug_xyza.allFinite()) {
+            if (mpc_control && planner.debug_xyza.allFinite()) {
                 const auto aim_points = solver.reproject_armor(
                     planner.debug_xyza.head<3>(), planner.debug_xyza[3], target.armor_type,
                     target.name);
@@ -314,7 +314,7 @@ std::string build_status(
          << ",\"tracker_state\":\"" << tracker_state << "\""
          << ",\"mpc_control\":" << (mpc_control ? "true" : "false")
          << ",\"gimbal_control\":" << (gimbal_control ? "true" : "false")
-         << ",\"mpc_fire\":" << ((target_locked && plan.fire) ? "true" : "false")
+         << ",\"mpc_fire\":" << ((plan.control && plan.fire) ? "true" : "false")
          << ",\"legacy_control\":" << (legacy_command.control ? "true" : "false")
          << ",\"legacy_fire\":" << (legacy_fire ? "true" : "false")
          << ",\"yaw\":" << command_yaw << ",\"pitch\":" << command_pitch
@@ -431,8 +431,6 @@ int run_connection(
         config["simulation"]["max_fire_yaw_error"].value_or(0.012);
     const double max_fire_pitch_error =
         config["simulation"]["max_fire_pitch_error"].value_or(0.012);
-    const auto min_stable_lock_frames =
-        config["simulation"]["min_stable_lock_frames"].value_or(5U);
     const auto search_return_delay_frames =
         config["simulation"]["search_return_delay_frames"].value_or(20U);
 
@@ -441,7 +439,6 @@ int run_connection(
     std::size_t previous_detection_count = 0;
     bool previous_mpc_control = false;
     std::uint64_t frames_without_mpc = 0;
-    std::uint64_t stable_lock_frames = 0;
     auto last_fire = std::chrono::steady_clock::time_point::min();
     LOG_INFO(MODULE, "Robocore full pipeline connected to Gazebo bridge");
 
@@ -497,8 +494,7 @@ int run_connection(
         const auto now = std::chrono::steady_clock::now();
         const std::string tracker_state = tracker.state();
         const bool target_locked = plan.control && tracker_state == "tracking";
-        // temp_lost 时 Tracker 仍持有有效 EKF 状态。继续预测跟枪以避免云台停顿，
-        // 但只有重新看到装甲并回到 tracking 后才允许开火。
+        // temp_lost 时 Tracker 仍持有有效 EKF 状态，继续预测跟枪和执行 Planner 决策。
         const bool mpc_control =
             plan.control && (tracker_state == "tracking" || tracker_state == "temp_lost");
         if (mpc_control) {
@@ -529,14 +525,9 @@ int run_connection(
         const bool gimbal_on_target =
             std::abs(tools::limit_rad(plan.yaw - frame.yaw)) <= max_fire_yaw_error &&
             std::abs(plan.pitch - frame.pitch) <= max_fire_pitch_error;
-        if (target_locked && plan.fire && gimbal_on_target) {
-            ++stable_lock_frames;
-        } else {
-            stable_lock_frames = 0;
-        }
+        // Planner 是唯一瞄准和开火决策源；适配层只确认枪管到位并限制实体弹丸射频。
         const bool fire =
-            planner_auto_fire && target_locked && plan.fire && gimbal_on_target &&
-            stable_lock_frames >= min_stable_lock_frames && fire_ready;
+            planner_auto_fire && mpc_control && plan.fire && gimbal_on_target && fire_ready;
         if (fire) last_fire = now;
 
         if (debug_detections.size() != previous_detection_count ||
@@ -565,7 +556,7 @@ int run_connection(
 
         control_preview.draw(
             image, debug_detections, targets, solver, planner, plan, tracker_state,
-            target_locked, fire, frame, inference_ms, frame_count);
+            mpc_control, target_locked, fire, frame, inference_ms, frame_count);
 
         const auto status = build_status(
             armors, debug_detections, targets, plan, mpc_control, target_locked, gimbal_control,
@@ -600,7 +591,7 @@ int main(int argc, char* argv[]) {
     const auto host = cli.get<std::string>("host");
     const int port = cli.get<int>("port");
     const auto config = toml::parse_file(config_path);
-    const double fire_interval = config["simulation"]["fire_interval"].value_or(0.30);
+    const double fire_interval = config["simulation"]["fire_interval"].value_or(0.10);
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
