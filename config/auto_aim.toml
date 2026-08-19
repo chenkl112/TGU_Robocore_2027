@@ -12,7 +12,7 @@ enable_buff = false
 source = 0
 width = 0
 height = 0
-fps = 0.0
+fps = 200.0
 # TODO(team): Replace these calibration values with results from the actual camera/gimbal pair.
 R_gimbal2imubody = [
     1.0, 0.0, 0.0,
@@ -55,7 +55,7 @@ classify_model = "assets/tiny_resnet.onnx"
 
 [yolo]
 yolo_name = "yolov8"
-yolo_model = "assets/yolov8.xml"
+yolo_model = "assets/yolov8_640x480.xml"
 device = "AUTO"
 use_roi = false
 roi_x = 0

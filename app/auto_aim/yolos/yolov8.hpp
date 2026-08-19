@@ -34,6 +34,9 @@ private:
     std::string device_, model_path_;
     bool debug_, use_roi_;
 
+    static constexpr std::size_t network_width_ = 640;
+    static constexpr std::size_t network_height_ = 480;
+
     const int class_num_ = 2;
     const float nms_threshold_ = 0.3;
     const float score_threshold_ = 0.7;

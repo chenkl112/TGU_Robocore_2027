@@ -1,26 +1,33 @@
 #include "usbcamera.hpp"
 
+#include <algorithm>
+
 #include "tools/logger.hpp"
 
 namespace io {
 
 static constexpr const char* MODULE = "USB_CAM";
+static constexpr double MAX_CAPTURE_FPS = 200.0;
+
+static double normalize_fps(double fps) {
+    return fps > 0.0 ? std::clamp(fps, 1.0, MAX_CAPTURE_FPS) : MAX_CAPTURE_FPS;
+}
 
 USBCamera::USBCamera(int device_index, int width, int height, double fps)
-    : source_(device_index), width_(width), height_(height), fps_(fps) {
+    : source_(device_index), width_(width), height_(height), fps_(normalize_fps(fps)) {
     open(source_, width_, height_, fps_);
     thread_ = std::thread(&USBCamera::capture_thread, this);
 }
 
 USBCamera::USBCamera(const std::string& source, int width, int height, double fps)
-    : source_(source), width_(width), height_(height), fps_(fps) {
+    : source_(source), width_(width), height_(height), fps_(normalize_fps(fps)) {
     open(source_, width_, height_, fps_);
     thread_ = std::thread(&USBCamera::capture_thread, this);
 }
 
 USBCamera::USBCamera(
     const std::variant<int, std::string>& source, int width, int height, double fps)
-    : source_(source), width_(width), height_(height), fps_(fps) {
+    : source_(source), width_(width), height_(height), fps_(normalize_fps(fps)) {
     open(source_, width_, height_, fps_);
     thread_ = std::thread(&USBCamera::capture_thread, this);
 }
@@ -50,7 +57,7 @@ void USBCamera::open(
 
     if (width > 0) cap_.set(cv::CAP_PROP_FRAME_WIDTH, width);
     if (height > 0) cap_.set(cv::CAP_PROP_FRAME_HEIGHT, height);
-    if (fps > 0) cap_.set(cv::CAP_PROP_FPS, fps);
+    cap_.set(cv::CAP_PROP_FPS, normalize_fps(fps));
     cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
 
     LOG_INFO(
@@ -67,6 +74,7 @@ void USBCamera::capture_thread() {
             continue;
         }
 
+        const auto capture_started = std::chrono::steady_clock::now();
         cv::Mat img;
         bool got = cap_.read(img);
         auto t = std::chrono::steady_clock::now();
@@ -85,6 +93,12 @@ void USBCamera::capture_thread() {
             ++frame_sequence_;
         }
         frame_cv_.notify_one();
+
+        const auto frame_period = std::chrono::duration<double>(1.0 / fps_);
+        const auto next_frame = capture_started +
+                                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                    frame_period);
+        std::this_thread::sleep_until(next_frame);
     }
 }
 

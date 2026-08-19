@@ -1,0 +1,106 @@
+title = "TGU Robocore Gazebo full auto-aim"
+
+[scope]
+competition = "alliance"
+targets = ["hero", "engineer", "infantry", "sentry"]
+enable_outpost = false
+enable_buff = false
+
+[camera]
+source = "gazebo-tcp"
+width = 640
+height = 480
+fps = 200.0
+R_gimbal2imubody = [
+    1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0,
+]
+# Gazebo optical frame: x right, y down, z forward.
+# Robocore gimbal frame: x forward, y left, z up.
+R_camera2gimbal = [
+    0.0, 0.0, 1.0,
+    -1.0, 0.0, 0.0,
+    0.0, -1.0, 0.0,
+]
+t_camera2gimbal = [0.22, 0.0, 0.045]
+camera_matrix = [
+    662.4531, 0.0, 320.0,
+    0.0, 662.4531, 240.0,
+    0.0, 0.0, 1.0,
+]
+distort_coeffs = [0.0, 0.0, 0.0, 0.0, 0.0]
+
+[detector]
+threshold = 150.0
+max_angle_error = 45.0
+min_lightbar_ratio = 1.5
+max_lightbar_ratio = 20.0
+min_lightbar_length = 4.0
+min_armor_ratio = 1.0
+max_armor_ratio = 5.0
+max_side_ratio = 1.5
+max_rectangular_error = 25.0
+min_confidence = 0.50
+
+[classifier]
+classify_model = "assets/tiny_resnet.onnx"
+
+[yolo]
+yolo_name = "yolov8"
+yolo_model = "assets/yolov8_640x480.xml"
+device = "AUTO"
+use_roi = false
+roi_x = 0
+roi_y = 0
+roi_width = -1
+roi_height = -1
+
+[tracker]
+enemy_color = "blue"
+priority_mode = 1
+min_detect_count = 3
+max_temp_lost_count = 15
+
+[aimer]
+yaw_offset = 0.0
+pitch_offset = 0.0
+coming_angle = 60.0
+leaving_angle = 20.0
+decision_speed = 10.0
+high_speed_delay_time = 0.026
+low_speed_delay_time = 0.010
+
+[shooter]
+first_tolerance = 5.0
+second_tolerance = 2.0
+judge_distance = 3.0
+auto_fire = true
+
+[planner]
+yaw_offset = 0.0
+pitch_offset = 0.0
+fire_thresh = 0.020
+decision_speed = 10.0
+high_speed_delay_time = 0.026
+low_speed_delay_time = 0.010
+max_yaw_acc = 50.0
+Q_yaw = [9.0e6, 0.0]
+R_yaw = [1.0]
+max_pitch_acc = 100.0
+Q_pitch = [9.0e6, 0.0]
+R_pitch = [1.0]
+auto_fire = true
+
+[simulation]
+host = "127.0.0.1"
+port = 5800
+fire_interval = 0.30
+# Gazebo uses direct joint-position commands. These limits approximate a real
+# gimbal response and prevent one-frame MPC target switches from teleporting it.
+max_yaw_step = 0.05
+max_pitch_step = 0.03
+max_fire_yaw_error = 0.06
+max_fire_pitch_error = 0.06
+# Return to the forward search direction after this many frames without MPC control.
+search_return_delay_frames = 20

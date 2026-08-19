@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <format>
 #include <random>
+#include <stdexcept>
 
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
@@ -31,12 +32,26 @@ YOLOV8::YOLOV8(const std::string& config_path, bool debug)
     offset_ = cv::Point2f(x, y);
 
     auto model = core_.read_model(model_path_);
+    const auto model_shape = model->input().get_shape();
+    const ov::Shape expected_shape = {1, 3, network_height_, network_width_};
+    if (model_shape != expected_shape) {
+        throw std::runtime_error(std::format(
+            "YOLO model input must be NCHW 1x3x{}x{}, got {}", network_height_,
+            network_width_, model->input().get_partial_shape().to_string()));
+    }
+    const ov::Shape expected_output_shape = {1, 14, 6300};
+    if (model->output().get_shape() != expected_output_shape) {
+        throw std::runtime_error(std::format(
+            "YOLO model output must be 1x14x6300, got {}",
+            model->output().get_partial_shape().to_string()));
+    }
+
     ov::preprocess::PrePostProcessor ppp(model);
     auto& input = ppp.input();
 
     input.tensor()
         .set_element_type(ov::element::u8)
-        .set_shape({1, 416, 416, 3})
+        .set_shape({1, network_height_, network_width_, 3})
         .set_layout("NHWC")
         .set_color_format(ov::preprocess::ColorFormat::BGR);
 
@@ -50,6 +65,8 @@ YOLOV8::YOLOV8(const std::string& config_path, bool debug)
     model = ppp.build();
     compiled_model_ = core_.compile_model(
         model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
+    LOG_INFO(
+        MODULE, "Loaded YOLO model {} with 640x480 network input", model_path_);
 }
 
 std::list<Armor> YOLOV8::detect(const cv::Mat& raw_img, int frame_count) {
@@ -73,16 +90,19 @@ std::list<Armor> YOLOV8::detect(const cv::Mat& raw_img, int frame_count) {
         bgr_img = raw_img;
     }
 
-    auto x_scale = static_cast<double>(416) / bgr_img.rows;
-    auto y_scale = static_cast<double>(416) / bgr_img.cols;
-    auto scale = std::min(x_scale, y_scale);
+    const auto height_scale = static_cast<double>(network_height_) / bgr_img.rows;
+    const auto width_scale = static_cast<double>(network_width_) / bgr_img.cols;
+    const auto scale = std::min(height_scale, width_scale);
     auto h = static_cast<int>(bgr_img.rows * scale);
     auto w = static_cast<int>(bgr_img.cols * scale);
 
-    auto input = cv::Mat(416, 416, CV_8UC3, cv::Scalar(0, 0, 0));
+    auto input = cv::Mat(
+        static_cast<int>(network_height_), static_cast<int>(network_width_), CV_8UC3,
+        cv::Scalar(0, 0, 0));
     auto roi = cv::Rect(0, 0, w, h);
     cv::resize(bgr_img, input(roi), {w, h});
-    ov::Tensor input_tensor(ov::element::u8, {1, 416, 416, 3}, input.data);
+    ov::Tensor input_tensor(
+        ov::element::u8, {1, network_height_, network_width_, 3}, input.data);
 
     auto infer_request = compiled_model_.create_infer_request();
     infer_request.set_input_tensor(input_tensor);
