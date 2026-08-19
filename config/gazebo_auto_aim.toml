@@ -57,7 +57,7 @@ roi_width = -1
 roi_height = -1
 
 [tracker]
-enemy_color = "blue"
+enemy_color = "red"
 priority_mode = 1
 min_detect_count = 5
 max_temp_lost_count = 25

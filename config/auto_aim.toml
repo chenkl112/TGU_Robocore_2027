@@ -64,7 +64,7 @@ roi_width = -1
 roi_height = -1
 
 [tracker]
-enemy_color = "blue"
+enemy_color = "red"
 # 原版优先级模式：1 = 3/4 > 1 > 5/哨兵 > 2；2 = 2 > 1/3/4/5 > 哨兵。
 priority_mode = 1
 min_detect_count = 5
