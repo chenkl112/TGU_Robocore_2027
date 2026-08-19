@@ -6,6 +6,7 @@
 tmp/
 build/
 patterns/
+output/
 
 CMakeCache.txt
 *.log

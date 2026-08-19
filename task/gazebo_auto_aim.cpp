@@ -11,7 +11,9 @@
 #include <cmath>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <list>
 #include <optional>
@@ -125,15 +127,175 @@ struct DebugDetection {
     bool pose_valid = false;
 };
 
+class ControlPreview {
+public:
+    explicit ControlPreview(const toml::table& config) {
+        show_window_ = config["simulation"]["show_recognition_window"].value_or(true) &&
+                       std::getenv("DISPLAY") != nullptr;
+        save_preview_ = config["simulation"]["save_recognition_preview"].value_or(true);
+        preview_path_ = config["simulation"]["recognition_preview_path"].value_or(
+            std::string{"output/robocore_recognition.png"});
+        window_x_ = config["simulation"]["recognition_window_x"].value_or(1300);
+        window_y_ = config["simulation"]["recognition_window_y"].value_or(40);
+        if (save_preview_) {
+            const auto parent = std::filesystem::path(preview_path_).parent_path();
+            if (!parent.empty()) std::filesystem::create_directories(parent);
+        }
+    }
+
+    void draw(
+        const cv::Mat& image, const std::vector<DebugDetection>& detections,
+        const std::list<app::auto_aim::Target>& targets, app::auto_aim::Solver& solver,
+        const app::auto_aim::Planner& planner, const app::auto_aim::Plan& plan,
+        const std::string& tracker_state, bool target_locked, bool fire,
+        const FrameHeader& frame, double inference_ms, std::uint64_t frame_count) {
+        cv::Mat view = image.clone();
+        if (view.empty()) return;
+
+        for (const auto& detection : detections) {
+            if (detection.armor.points.size() != 4) continue;
+            std::vector<cv::Point> points;
+            points.reserve(4);
+            for (const auto& point : detection.armor.points) points.emplace_back(point);
+            cv::polylines(view, points, true, cv::Scalar(70, 255, 80), 2, cv::LINE_AA);
+            cv::putText(
+                view,
+                app::auto_aim::ARMOR_NAMES[detection.armor.name] +
+                    cv::format(" %.2f", detection.armor.confidence),
+                points.front() + cv::Point(0, -7), cv::FONT_HERSHEY_SIMPLEX, 0.46,
+                cv::Scalar(70, 255, 80), 1, cv::LINE_AA);
+        }
+
+        if (!targets.empty()) {
+            const auto& target = targets.front();
+            const auto armors = target.armor_xyza_list();
+            // 与同济 auto_aim_debug_mpc.cpp 一致：Tracker/EKF 的每个 xyza
+            // 直接交给 Solver 反投影，不在显示层重排装甲 ID 或修正几何。
+            for (const auto& armor : armors) {
+                const auto projected = solver.reproject_armor(
+                    armor.head<3>(), armor[3], target.armor_type, target.name);
+                if (!drawable_polygon(projected, view.size())) continue;
+                std::vector<cv::Point> points;
+                points.reserve(projected.size());
+                for (const auto& point : projected) {
+                    points.emplace_back(point);
+                }
+                cv::polylines(
+                    view, points, true, cv::Scalar(255, 120, 20), 2, cv::LINE_AA);
+            }
+
+            if (plan.control && planner.debug_xyza.allFinite()) {
+                const auto aim_points = solver.reproject_armor(
+                    planner.debug_xyza.head<3>(), planner.debug_xyza[3], target.armor_type,
+                    target.name);
+                if (drawable_polygon(aim_points, view.size())) {
+                    std::vector<cv::Point> points;
+                    points.reserve(aim_points.size());
+                    for (const auto& point : aim_points) points.emplace_back(point);
+                    cv::polylines(
+                        view, points, true,
+                        fire ? cv::Scalar(30, 30, 255) : cv::Scalar(0, 190, 255), 3,
+                        cv::LINE_AA);
+                }
+            }
+        }
+
+        const std::string target_name =
+            targets.empty() ? "-" : app::auto_aim::ARMOR_NAMES[targets.front().name];
+        std::string geometry = "geometry r1 -- r2 -- dz --";
+        if (!targets.empty()) {
+            const auto state = targets.front().ekf_x();
+            geometry = cv::format(
+                "geometry r1 %.3f r2 %.3f dz %+.3f m", state[8], state[8] + state[9],
+                state[10]);
+        }
+        const std::vector<std::string> rows = {
+            "ROBOCORE VISION / TRACKER EKF",
+            "state " + upper_state(tracker_state),
+            "target " + target_name,
+            cv::format("detections %zu", detections.size()),
+            "aim planner.debug_xyza",
+            geometry,
+            std::string{"locked "} + (target_locked ? "1" : "0"),
+            std::string{"fire "} + (fire ? "1" : "0"),
+            cv::format(
+                "gimbal yaw %+6.2f pitch %+6.2f deg", frame.yaw * 180.0 / CV_PI,
+                frame.pitch * 180.0 / CV_PI),
+            cv::format(
+                "inference %.1f ms frame %llu", inference_ms,
+                static_cast<unsigned long long>(frame_count)),
+        };
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+            cv::putText(
+                view, rows[index], cv::Point(12, 23 + static_cast<int>(index) * 23),
+                cv::FONT_HERSHEY_SIMPLEX, 0.46, cv::Scalar(235, 242, 245), 1,
+                cv::LINE_AA);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (save_preview_ && !targets.empty() &&
+            (last_save_ == std::chrono::steady_clock::time_point::min() ||
+             std::chrono::duration<double>(now - last_save_).count() >= 0.20)) {
+            cv::imwrite(preview_path_, view);
+            last_save_ = now;
+        }
+        if (show_window_) {
+            try {
+                if (!window_initialized_) {
+                    cv::namedWindow(window_name_, cv::WINDOW_NORMAL);
+                    cv::resizeWindow(window_name_, view.cols, view.rows);
+                    cv::moveWindow(window_name_, window_x_, window_y_);
+                    window_initialized_ = true;
+                }
+                cv::imshow(window_name_, view);
+                const int key = cv::waitKey(1) & 0xFF;
+                if (key == 'q' || key == 27) {
+                    cv::destroyWindow(window_name_);
+                    show_window_ = false;
+                }
+            } catch (const cv::Exception& error) {
+                LOG_WARN(MODULE, "Disable recognition window: {}", error.what());
+                show_window_ = false;
+            }
+        }
+    }
+
+private:
+    static bool finite_point(const cv::Point2f& point) {
+        return std::isfinite(point.x) && std::isfinite(point.y);
+    }
+
+    static bool drawable_polygon(
+        const std::vector<cv::Point2f>& points, const cv::Size& image_size) {
+        if (points.size() != 4) return false;
+        return std::all_of(points.begin(), points.end(), [&](const cv::Point2f& point) {
+            return finite_point(point) && point.x > -image_size.width &&
+                   point.x < image_size.width * 2 && point.y > -image_size.height &&
+                   point.y < image_size.height * 2;
+        });
+    }
+
+    const std::string window_name_{"Robocore Vision Tracker EKF"};
+    std::string preview_path_;
+    int window_x_{1300};
+    int window_y_{40};
+    bool show_window_{false};
+    bool save_preview_{true};
+    bool window_initialized_{false};
+    std::chrono::steady_clock::time_point last_save_{
+        std::chrono::steady_clock::time_point::min()};
+};
+
 std::string build_status(
     const std::list<app::auto_aim::Armor>& tracked_armors,
     const std::vector<DebugDetection>& detections, const std::list<app::auto_aim::Target>& targets,
-    const app::auto_aim::Plan& plan, bool mpc_control, bool gimbal_control,
+    const app::auto_aim::Plan& plan, bool mpc_control, bool target_locked, bool gimbal_control,
     const io::Command& legacy_command, bool legacy_fire, bool fire, double command_yaw,
     double command_pitch,
     const std::string& tracker_state,
     const FrameHeader& frame, double inference_ms, std::uint64_t frame_count) {
-    const std::string state = fire ? "FIRING" : (mpc_control ? "LOCKED" : upper_state(tracker_state));
+    const std::string state =
+        fire ? "FIRING" : (target_locked ? "LOCKED" : upper_state(tracker_state));
 
     std::ostringstream json;
     json << std::fixed << std::setprecision(6);
@@ -141,7 +303,7 @@ std::string build_status(
          << "\"YOLOV8/Solver/Tracker/EKF/Aimer/Shooter/Planner/TinyMPC\""
          << ",\"state\":\"" << state << "\""
          << ",\"detected\":" << (!tracked_armors.empty() ? "true" : "false")
-         << ",\"locked\":" << (mpc_control ? "true" : "false")
+         << ",\"locked\":" << (target_locked ? "true" : "false")
          << ",\"fire\":" << (fire ? "true" : "false")
          << ",\"frame\":" << frame_count
          << ",\"image_size\":[" << frame.width << ',' << frame.height << ']'
@@ -152,7 +314,7 @@ std::string build_status(
          << ",\"tracker_state\":\"" << tracker_state << "\""
          << ",\"mpc_control\":" << (mpc_control ? "true" : "false")
          << ",\"gimbal_control\":" << (gimbal_control ? "true" : "false")
-         << ",\"mpc_fire\":" << ((mpc_control && plan.fire) ? "true" : "false")
+         << ",\"mpc_fire\":" << ((target_locked && plan.fire) ? "true" : "false")
          << ",\"legacy_control\":" << (legacy_command.control ? "true" : "false")
          << ",\"legacy_fire\":" << (legacy_fire ? "true" : "false")
          << ",\"yaw\":" << command_yaw << ",\"pitch\":" << command_pitch
@@ -162,6 +324,54 @@ std::string build_status(
          << ",\"pitch_acc\":" << (mpc_control ? plan.pitch_acc : 0.0)
          << ",\"yaw_error\":" << tools::limit_rad(command_yaw - frame.yaw)
          << ",\"pitch_error\":" << command_pitch - frame.pitch;
+
+    json << ",\"vision_target\":";
+    if (targets.empty()) {
+        json << "null";
+    } else {
+        const auto& vision_target = targets.front();
+        const auto state = vision_target.ekf_x();
+        const auto predicted_armors = vision_target.armor_xyza_list();
+        json << "{\"source\":\"tracker_ekf\",\"frame\":\"gimbal_origin_world_axes\""
+             << ",\"name\":\"" << app::auto_aim::ARMOR_NAMES[vision_target.name] << "\""
+             << ",\"center\":[";
+        append_number(json, state[0]);
+        json << ',';
+        append_number(json, state[2]);
+        json << ',';
+        append_number(json, state[4]);
+        json << "],\"velocity\":[";
+        append_number(json, state[1]);
+        json << ',';
+        append_number(json, state[3]);
+        json << ',';
+        append_number(json, state[5]);
+        json << "],\"yaw\":";
+        append_number(json, state[6]);
+        json << ",\"yaw_rate\":";
+        append_number(json, state[7]);
+        json << ",\"radius_1\":";
+        append_number(json, state[8]);
+        json << ",\"radius_2\":";
+        append_number(json, state[8] + state[9]);
+        json << ",\"height_difference\":";
+        append_number(json, state[10]);
+        json << ",\"last_armor_id\":" << vision_target.last_id << ",\"armors\":[";
+        for (std::size_t index = 0; index < predicted_armors.size(); ++index) {
+            if (index != 0) json << ',';
+            const auto& armor = predicted_armors[index];
+            json << "{\"id\":" << index << ",\"center\":[";
+            append_number(json, armor[0]);
+            json << ',';
+            append_number(json, armor[1]);
+            json << ',';
+            append_number(json, armor[2]);
+            json << "],\"yaw\":";
+            append_number(json, armor[3]);
+            json << '}';
+        }
+        json << "]}";
+    }
 
     if (!tracked_armors.empty() && tracked_armors.front().points.size() == 4) {
         json << ",\"box\":";
@@ -204,15 +414,6 @@ std::string build_status(
     return json.str();
 }
 
-double approach(double current, double target, double max_step) {
-    return current + std::clamp(target - current, -max_step, max_step);
-}
-
-double approach_angle(double current, double target, double max_step) {
-    return tools::limit_rad(
-        current + std::clamp(tools::limit_rad(target - current), -max_step, max_step));
-}
-
 int run_connection(
     int socket_fd, const std::string& config_path, double fire_interval) {
     app::auto_aim::YOLO yolo(config_path, false);
@@ -222,15 +423,16 @@ int run_connection(
     app::auto_aim::Shooter shooter(config_path);
     app::auto_aim::Planner planner(config_path);
     auto config = toml::parse_file(config_path);
+    ControlPreview control_preview(config);
     const bool planner_auto_fire = config["planner"]["auto_fire"].value_or(false);
     const auto expected_width = config["camera"]["width"].value_or(640U);
     const auto expected_height = config["camera"]["height"].value_or(480U);
-    const double max_yaw_step = config["simulation"]["max_yaw_step"].value_or(0.05);
-    const double max_pitch_step = config["simulation"]["max_pitch_step"].value_or(0.03);
     const double max_fire_yaw_error =
-        config["simulation"]["max_fire_yaw_error"].value_or(0.06);
+        config["simulation"]["max_fire_yaw_error"].value_or(0.012);
     const double max_fire_pitch_error =
-        config["simulation"]["max_fire_pitch_error"].value_or(0.06);
+        config["simulation"]["max_fire_pitch_error"].value_or(0.012);
+    const auto min_stable_lock_frames =
+        config["simulation"]["min_stable_lock_frames"].value_or(5U);
     const auto search_return_delay_frames =
         config["simulation"]["search_return_delay_frames"].value_or(20U);
 
@@ -239,6 +441,7 @@ int run_connection(
     std::size_t previous_detection_count = 0;
     bool previous_mpc_control = false;
     std::uint64_t frames_without_mpc = 0;
+    std::uint64_t stable_lock_frames = 0;
     auto last_fire = std::chrono::steady_clock::time_point::min();
     LOG_INFO(MODULE, "Robocore full pipeline connected to Gazebo bridge");
 
@@ -292,21 +495,28 @@ int run_connection(
             legacy_command, aimer, targets, gimbal_position);
 
         const auto now = std::chrono::steady_clock::now();
-        const bool mpc_control = plan.control && tracker.state() == "tracking";
+        const std::string tracker_state = tracker.state();
+        const bool target_locked = plan.control && tracker_state == "tracking";
+        // temp_lost 时 Tracker 仍持有有效 EKF 状态。继续预测跟枪以避免云台停顿，
+        // 但只有重新看到装甲并回到 tracking 后才允许开火。
+        const bool mpc_control =
+            plan.control && (tracker_state == "tracking" || tracker_state == "temp_lost");
         if (mpc_control) {
             frames_without_mpc = 0;
-        } else {
+        } else if (tracker_state == "lost") {
             ++frames_without_mpc;
+        } else {
+            frames_without_mpc = 0;
         }
 
         double command_yaw = frame.yaw;
         double command_pitch = frame.pitch;
         if (mpc_control) {
-            command_yaw = approach_angle(frame.yaw, plan.yaw, max_yaw_step);
-            command_pitch = approach(frame.pitch, plan.pitch, max_pitch_step);
+            command_yaw = plan.yaw;
+            command_pitch = plan.pitch;
         } else if (frames_without_mpc >= search_return_delay_frames) {
-            command_yaw = approach_angle(frame.yaw, 0.0, max_yaw_step);
-            command_pitch = approach(frame.pitch, 0.0, max_pitch_step);
+            command_yaw = 0.0;
+            command_pitch = 0.0;
         }
         const bool search_control =
             !mpc_control && frames_without_mpc >= search_return_delay_frames &&
@@ -319,8 +529,14 @@ int run_connection(
         const bool gimbal_on_target =
             std::abs(tools::limit_rad(plan.yaw - frame.yaw)) <= max_fire_yaw_error &&
             std::abs(plan.pitch - frame.pitch) <= max_fire_pitch_error;
+        if (target_locked && plan.fire && gimbal_on_target) {
+            ++stable_lock_frames;
+        } else {
+            stable_lock_frames = 0;
+        }
         const bool fire =
-            planner_auto_fire && mpc_control && plan.fire && gimbal_on_target && fire_ready;
+            planner_auto_fire && target_locked && plan.fire && gimbal_on_target &&
+            stable_lock_frames >= min_stable_lock_frames && fire_ready;
         if (fire) last_fire = now;
 
         if (debug_detections.size() != previous_detection_count ||
@@ -347,10 +563,14 @@ int run_connection(
             previous_mpc_control = mpc_control;
         }
 
+        control_preview.draw(
+            image, debug_detections, targets, solver, planner, plan, tracker_state,
+            target_locked, fire, frame, inference_ms, frame_count);
+
         const auto status = build_status(
-            armors, debug_detections, targets, plan, mpc_control, gimbal_control, legacy_command,
-            legacy_fire, fire, command_yaw, command_pitch, tracker.state(), frame, inference_ms,
-            frame_count);
+            armors, debug_detections, targets, plan, mpc_control, target_locked, gimbal_control,
+            legacy_command, legacy_fire, fire, command_yaw, command_pitch, tracker_state, frame,
+            inference_ms, frame_count);
         if (!send_all(socket_fd, status)) return 1;
         if (frame_count % 100 == 0) {
             LOG_INFO(

@@ -59,8 +59,8 @@ roi_height = -1
 [tracker]
 enemy_color = "blue"
 priority_mode = 1
-min_detect_count = 3
-max_temp_lost_count = 15
+min_detect_count = 5
+max_temp_lost_count = 25
 
 [aimer]
 yaw_offset = 0.0
@@ -80,7 +80,7 @@ auto_fire = true
 [planner]
 yaw_offset = 0.0
 pitch_offset = 0.0
-fire_thresh = 0.020
+fire_thresh = 0.0035
 decision_speed = 10.0
 high_speed_delay_time = 0.026
 low_speed_delay_time = 0.010
@@ -96,11 +96,15 @@ auto_fire = true
 host = "127.0.0.1"
 port = 5800
 fire_interval = 0.30
-# Gazebo uses direct joint-position commands. These limits approximate a real
-# gimbal response and prevent one-frame MPC target switches from teleporting it.
-max_yaw_step = 0.05
-max_pitch_step = 0.03
-max_fire_yaw_error = 0.06
-max_fire_pitch_error = 0.06
+# 实际反馈与 MPC 输出都进入此门限，并连续稳定若干帧后才允许开火。
+max_fire_yaw_error = 0.012
+max_fire_pitch_error = 0.012
+min_stable_lock_frames = 5
+# 识别小窗完全由 Robocore 根据 YOLO、PnP、Tracker/EKF 与 Planner 输出绘制。
+show_recognition_window = true
+save_recognition_preview = true
+recognition_preview_path = "output/robocore_recognition.png"
+recognition_window_x = 1300
+recognition_window_y = 40
 # Return to the forward search direction after this many frames without MPC control.
 search_return_delay_frames = 20
