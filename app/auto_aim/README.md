@@ -15,9 +15,8 @@ included.
 - `solver`: PnP, coordinate transforms and yaw reprojection optimization.
 - `tracker`: target state machine and observation association.
 - `target`: 11-state whole-vehicle EKF model, including two-armor balance infantry.
-- `aimer`: original armor selection, delay prediction and iterative ballistic aiming.
-- `shooter`: original distance-dependent fire tolerance and command stability gate.
-- `planner`: TinyMPC experiment source retained for later versions; excluded from the v0.1 build.
+- `planner`: original `standard_mpc` trajectory generation and TinyMPC yaw/pitch control.
+- `aimer` and `shooter`: retained traditional control path; not used by the current MPC entry point.
 - `multithread`: latest-frame YOLO worker.
 
 ## Coordinate and unit contract
@@ -35,6 +34,6 @@ included.
 1. Confirm image timestamp and IMU quaternion interpolation direction.
 2. Verify PnP depth and reprojection on recorded images.
 3. Confirm world/gimbal yaw and pitch sign conventions against the lower board.
-4. Tune Tracker, Aimer and Shooter values through offline replay.
-5. Verify the Shooter command-stability and gimbal-error gates on a disabled-friction-wheel rig.
-6. Enable `[shooter].auto_fire` only after the previous checks pass.
+4. Tune Tracker and Planner values through offline replay.
+5. Verify MPC angle, angular-velocity and angular-acceleration outputs on a disabled-friction-wheel rig.
+6. Enable `[planner].auto_fire` only after the previous checks pass.

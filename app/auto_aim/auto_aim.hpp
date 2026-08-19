@@ -6,6 +6,7 @@
 #include "armor.hpp"
 #include "classifier.hpp"
 #include "detector.hpp"
+#include "planner/planner.hpp"
 #include "shooter.hpp"
 #include "solver.hpp"
 #include "target.hpp"

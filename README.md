@@ -12,8 +12,7 @@ The armor pipeline is:
 
 ```text
 USB camera -> YOLOv8 -> armor classifier -> PnP/yaw optimization
-           -> tracker/EKF -> Aimer ballistics -> Shooter fire decision
-           -> gimbal command
+           -> tracker/EKF -> Planner trajectory -> TinyMPC -> gimbal command
 ```
 
 The implementation is adapted from TongjiSuperPower `sp_vision_25`. Its MIT
@@ -24,15 +23,14 @@ license is retained in `LICENSES/sp_vision_25-MIT.txt`.
 - YOLOv8 armor detection with OpenVINO.
 - Robot targets: hero, engineer, infantry and sentry.
 - PnP pose solving and armor yaw optimization.
-- Whole-vehicle EKF tracking, the original Aimer ballistics and Shooter fire
-  decision logic.
+- Whole-vehicle EKF tracking and the original `standard_mpc` Planner/TinyMPC
+  angle, angular-velocity and angular-acceleration control.
 - Both original `sp_vision_25` robot-priority modes and higher-priority target
   switching.
 - Existing Robocore serial, logger, TOML and Foxglove infrastructure retained.
 - No outpost targeting and no energy-mechanism algorithm.
-- Automatic fire is disabled by default. When enabled, the original Shooter
-  checks command stability, measured gimbal yaw error and distance-dependent
-  tolerances.
+- Automatic fire is disabled by default. When enabled, MPC checks the error
+  between its reference and solved trajectories.
 
 ### Dependencies
 
@@ -91,12 +89,18 @@ Offline replay:
 ./build/auto_aim_test --config-path=config/auto_aim.toml assets/demo/demo
 ```
 
+Hardware-independent MPC numeric smoke test:
+
+```bash
+./build/planner_test --config-path=config/auto_aim.toml
+```
+
 Replay video and pose text are not bundled in v0.1.
 
 ### Safety and limitations
 
-- `[shooter].auto_fire` defaults to `false`. Enable it only after verifying the
-  serial protocol, coordinate convention and calibration on a test rig.
+- `[planner].auto_fire` defaults to `false`. Enable it only after verifying the
+  serial protocol, coordinate convention, MPC outputs and calibration on a test rig.
 - Camera source, requested resolution and frame rate are configured under
   `[camera]` in `config/auto_aim.toml`.
 - Select the original robot-priority strategy with `[tracker].priority_mode`:

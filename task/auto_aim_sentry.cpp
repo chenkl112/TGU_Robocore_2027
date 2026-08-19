@@ -2,16 +2,14 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
-#include <list>
 #include <opencv2/opencv.hpp>
+#include <optional>
 #include <string>
 #include <thread>
-#include <utility>
 #include <variant>
 
-#include "app/auto_aim/aimer.hpp"
 #include "app/auto_aim/multithread/mt_yolo.hpp"
-#include "app/auto_aim/shooter.hpp"
+#include "app/auto_aim/planner/planner.hpp"
 #include "app/auto_aim/solver.hpp"
 #include "app/auto_aim/target.hpp"
 #include "app/auto_aim/tracker.hpp"
@@ -54,13 +52,11 @@ int run(int argc, char* argv[]) {
     app::auto_aim::MultiThreadYOLO mt_yolo(config_path);
     app::auto_aim::Solver solver(config_path);
     app::auto_aim::Tracker tracker(config_path, solver);
-    app::auto_aim::Aimer aimer(config_path);
-    app::auto_aim::Shooter shooter(config_path);
+    app::auto_aim::Planner planner(config_path);
+    const bool auto_fire = config["planner"]["auto_fire"].value_or(false);
 
-    using TimedTargets = std::pair<
-        std::list<app::auto_aim::Target>, std::chrono::steady_clock::time_point>;
-    tools::ThreadSafeQueue<TimedTargets, true> target_queue(1);
-    target_queue.push({{}, std::chrono::steady_clock::now()});
+    tools::ThreadSafeQueue<std::optional<app::auto_aim::Target>, true> target_queue(1);
+    target_queue.push(std::nullopt);
 
     std::atomic<bool> quit{false};
 
@@ -97,11 +93,15 @@ int run(int argc, char* argv[]) {
             solver.set_R_gimbal2world(q);
 
             auto targets = tracker.track(armors, t);
-            target_queue.push({std::move(targets), t});
+            if (targets.empty()) {
+                target_queue.push(std::nullopt);
+            } else {
+                target_queue.push(targets.front());
+            }
         }
     });
 
-    // ===== 线程 3:Aimer/Shooter → Gimbal =====
+    // ===== 线程 3:Planner/TinyMPC → Gimbal =====
     auto plan_thread = std::thread([&]() {
         while (!quit) {
             if (gimbal.mode() != io::GimbalMode::AUTO_AIM) {
@@ -114,15 +114,12 @@ int run(int argc, char* argv[]) {
                 continue;
             }
 
-            auto [targets, timestamp] = target_queue.front();
             auto gs = gimbal.state();
-            auto command = aimer.aim(targets, timestamp, gs.bullet_speed);
-            const Eigen::Vector3d gimbal_position{gs.yaw, gs.pitch, 0.0};
-            command.shoot = shooter.shoot(command, aimer, targets, gimbal_position);
+            auto plan = planner.plan(target_queue.front(), gs.bullet_speed);
 
             gimbal.send(
-                command.control, command.shoot, command.yaw, 0.0F, 0.0F,
-                command.pitch, 0.0F, 0.0F);
+                plan.control, auto_fire && plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc,
+                plan.pitch, plan.pitch_vel, plan.pitch_acc);
 
             std::this_thread::sleep_for(10ms);
         }

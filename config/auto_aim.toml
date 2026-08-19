@@ -83,7 +83,24 @@ low_speed_delay_time = 0.010
 first_tolerance = 5.0
 second_tolerance = 2.0
 judge_distance = 3.0
-# 上车完成协议、坐标系和标定验证前必须保持关闭。
+# 传统 Aimer/Shooter 链路的保留参数，当前 MPC 正式入口不使用。
+auto_fire = false
+
+[planner]
+# 参数移植自 sp_vision_25 standard_mpc，偏移和延迟仍需实车标定。
+yaw_offset = -0.8
+pitch_offset = -1.0
+fire_thresh = 0.0035
+decision_speed = 10.0
+high_speed_delay_time = 0.026
+low_speed_delay_time = 0.010
+max_yaw_acc = 50.0
+Q_yaw = [9.0e6, 0.0]
+R_yaw = [1.0]
+max_pitch_acc = 100.0
+Q_pitch = [9.0e6, 0.0]
+R_pitch = [1.0]
+# 上车完成协议、坐标系、MPC 输出与标定验证前必须保持关闭。
 auto_fire = false
 
 [gimbal]

@@ -2,13 +2,11 @@
 #include <chrono>
 #include <fstream>
 #include <format>
-#include <list>
 #include <opencv2/opencv.hpp>
+#include <optional>
 #include <thread>
-#include <utility>
 
-#include "app/auto_aim/aimer.hpp"
-#include "app/auto_aim/shooter.hpp"
+#include "app/auto_aim/planner/planner.hpp"
 #include "app/auto_aim/solver.hpp"
 #include "app/auto_aim/target.hpp"
 #include "app/auto_aim/tracker.hpp"
@@ -56,14 +54,10 @@ int main(int argc, char* argv[]) {
     app::auto_aim::YOLO yolo(config_path);
     app::auto_aim::Solver solver(config_path);
     app::auto_aim::Tracker tracker(config_path, solver);
-    app::auto_aim::Aimer aimer(config_path);
-    app::auto_aim::Shooter shooter(config_path);
-    (void)shooter;
+    app::auto_aim::Planner planner(config_path);
 
-    using TimedTargets = std::pair<
-        std::list<app::auto_aim::Target>, std::chrono::steady_clock::time_point>;
-    tools::ThreadSafeQueue<TimedTargets, true> target_queue(1);
-    target_queue.push({{}, std::chrono::steady_clock::now()});
+    tools::ThreadSafeQueue<std::optional<app::auto_aim::Target>, true> target_queue(1);
+    target_queue.push(std::nullopt);
 
     std::atomic<bool> quit{false};
 
@@ -74,13 +68,15 @@ int main(int argc, char* argv[]) {
                 std::this_thread::sleep_for(2ms);
                 continue;
             }
-            auto [targets, timestamp] = target_queue.front();
-            auto command = aimer.aim(targets, timestamp, bullet_speed);
+            auto plan = planner.plan(target_queue.front(), bullet_speed);
 
-            if (command.control) {
+            if (plan.control) {
                 LOG_INFO(
-                    MODULE, "[Aim] yaw={:.3f} pitch={:.3f}",
-                    command.yaw * 57.3, command.pitch * 57.3);
+                    MODULE,
+                    "[MPC] yaw={:.3f} yaw_vel={:.3f} yaw_acc={:.3f} "
+                    "pitch={:.3f} pitch_vel={:.3f} pitch_acc={:.3f} fire={}",
+                    plan.yaw * 57.3, plan.yaw_vel, plan.yaw_acc, plan.pitch * 57.3,
+                    plan.pitch_vel, plan.pitch_acc, plan.fire);
             }
             std::this_thread::sleep_for(10ms);
         }
@@ -107,7 +103,11 @@ int main(int argc, char* argv[]) {
 
         auto armors = yolo.detect(img, frame_count);
         auto targets = tracker.track(armors, timestamp);
-        target_queue.push({std::move(targets), timestamp});
+        if (targets.empty()) {
+            target_queue.push(std::nullopt);
+        } else {
+            target_queue.push(targets.front());
+        }
 
         auto display = img.clone();
         tools::draw_text(display, std::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
