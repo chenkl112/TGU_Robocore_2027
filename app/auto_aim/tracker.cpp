@@ -20,8 +20,17 @@ Tracker::Tracker(const std::string& config_path, Solver& solver)
       last_timestamp_(std::chrono::steady_clock::now()) {
     auto config = toml::parse_file(config_path);
 
-    auto enemy_color_str = config["tracker"]["enemy_color"].value_or("blue");
-    enemy_color_ = (enemy_color_str == "red") ? Color::red : Color::blue;
+    const std::string enemy_color_str =
+        config["tracker"]["enemy_color"].value_or(std::string{"blue"});
+    if (enemy_color_str == "red") {
+        enemy_color_ = Color::red;
+    } else {
+        if (enemy_color_str != "blue") {
+            LOG_WARN(MODULE, "Invalid enemy_color {}, using blue", enemy_color_str);
+        }
+        enemy_color_ = Color::blue;
+    }
+    LOG_INFO(MODULE, "Enemy armor color: {}", COLORS[enemy_color_]);
     const int priority_mode = config["tracker"]["priority_mode"].value_or(1);
     if (priority_mode == static_cast<int>(PriorityMode::mode_two)) {
         priority_mode_ = PriorityMode::mode_two;
