@@ -202,6 +202,7 @@ public:
 
         const std::string target_name =
             targets.empty() ? "-" : app::auto_aim::ARMOR_NAMES[targets.front().name];
+        const double inference_fps = inference_ms > 0.0 ? 1000.0 / inference_ms : 0.0;
         std::string geometry = "geometry r1 -- r2 -- dz --";
         if (!targets.empty()) {
             const auto state = targets.front().ekf_x();
@@ -222,7 +223,7 @@ public:
                 "gimbal yaw %+6.2f pitch %+6.2f deg", frame.yaw * 180.0 / CV_PI,
                 frame.pitch * 180.0 / CV_PI),
             cv::format(
-                "inference %.1f ms frame %llu", inference_ms,
+                "inference %.1f ms  %.1f FPS  frame %llu", inference_ms, inference_fps,
                 static_cast<unsigned long long>(frame_count)),
         };
         for (std::size_t index = 0; index < rows.size(); ++index) {
@@ -296,6 +297,7 @@ std::string build_status(
     const FrameHeader& frame, double inference_ms, std::uint64_t frame_count) {
     const std::string state =
         fire ? "FIRING" : (target_locked ? "LOCKED" : upper_state(tracker_state));
+    const double inference_fps = inference_ms > 0.0 ? 1000.0 / inference_ms : 0.0;
 
     std::ostringstream json;
     json << std::fixed << std::setprecision(6);
@@ -309,6 +311,7 @@ std::string build_status(
          << ",\"image_size\":[" << frame.width << ',' << frame.height << ']'
          << ",\"network_input\":[640,480]"
          << ",\"inference_ms\":" << inference_ms
+         << ",\"inference_fps\":" << inference_fps
          << ",\"armor_count\":" << detections.size()
          << ",\"target_count\":" << targets.size()
          << ",\"tracker_state\":\"" << tracker_state << "\""
@@ -565,9 +568,10 @@ int run_connection(
         if (!send_all(socket_fd, status)) return 1;
         if (frame_count % 100 == 0) {
             LOG_INFO(
-                MODULE, "frame={} detections={} tracker={} mpc={} fire={} inference={:.1f}ms",
+                MODULE,
+                "frame={} detections={} tracker={} mpc={} fire={} inference={:.1f}ms/{:.1f}fps",
                 frame_count, armors.size(), tracker.state(), mpc_control, fire,
-                inference_ms);
+                inference_ms, inference_ms > 0.0 ? 1000.0 / inference_ms : 0.0);
         }
         ++frame_count;
     }
