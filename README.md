@@ -21,6 +21,8 @@ license is retained in `LICENSES/sp_vision_25-MIT.txt`.
 ### v0.1 scope
 
 - YOLOv8 armor detection with OpenVINO.
+- Fixed `640 x 480` YOLOv8 network input and `1 x 14 x 6300` output, both
+  validated when the detector starts.
 - Robot targets: hero, engineer, infantry and sentry.
 - PnP pose solving and armor yaw optimization.
 - Whole-vehicle EKF tracking and the original `standard_mpc` Planner/TinyMPC
@@ -66,6 +68,18 @@ CMake automatically discovers this local installation. To use an official
 system installation instead, pass its package directory explicitly with
 `-DOpenVINO_DIR=/path/to/openvino/cmake`.
 
+The default model is `assets/yolov8_640x480.xml`. The original `416 x 416` IR
+is retained as `assets/yolov8_416x416.xml` for provenance and conversion only;
+the current detector rejects it. Regenerate the `640 x 480` IR with:
+
+```bash
+.venv-openvino/bin/python tools/convert_yolov8_640x480.py
+```
+
+Camera capture size and network input size are separate. Hardware frames are
+aspect-preserving resized and padded on the right or bottom to `640 x 480`.
+Gazebo already supplies `640 x 480`, so its frames enter the network unscaled.
+
 ### Build
 
 ```bash
@@ -102,7 +116,8 @@ Replay video and pose text are not bundled in v0.1.
 - `[planner].auto_fire` defaults to `false`. Enable it only after verifying the
   serial protocol, coordinate convention, MPC outputs and calibration on a test rig.
 - Camera source, requested resolution and frame rate are configured under
-  `[camera]` in `config/auto_aim.toml`.
+  `[camera]` in `config/auto_aim.toml`. The camera backend clamps requests to
+  `1-200 FPS`; zero or negative values select the 200 FPS upper limit.
 - Select the original robot-priority strategy with `[tracker].priority_mode`:
   mode 1 prioritizes robots 3/4, while mode 2 prioritizes robot 2.
 - YOLOv5 and YOLO11 are not included in v0.1; YOLOv8 is the only selectable

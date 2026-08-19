@@ -28,6 +28,9 @@ included.
   intervals.
 - The camera matrix, distortion coefficients and camera-to-gimbal transform
   must come from the same physical camera installation.
+- The YOLO tensor contract is fixed at NHWC `1x480x640x3` before OpenVINO
+  preprocessing and NCHW `1x3x480x640` inside the model. The model output is
+  `1x14x6300`.
 
 ## Required validation before enabling fire
 

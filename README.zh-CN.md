@@ -18,6 +18,7 @@ USB 相机 -> YOLOv8 -> 装甲板数字分类 -> PnP/装甲板朝向角优化
 ### v0.1 功能范围
 
 - 使用 OpenVINO 运行 YOLOv8 装甲板检测。
+- YOLOv8 网络输入固定为 `640 x 480`，输出为 `1 x 14 x 6300`；启动时会校验模型形状。
 - 支持英雄、工程、步兵和哨兵机器人目标。
 - 支持 PnP 位姿解算和装甲板朝向角优化。
 - 支持整车 EKF 跟踪和原版 `standard_mpc` 的 Planner/TinyMPC 角度、角速度、角加速度控制。
@@ -60,6 +61,17 @@ CMake 会自动发现上述项目本地安装。如果需要使用系统中的 O
 cmake -S . -B build -DOpenVINO_DIR=/path/to/openvino/cmake
 ```
 
+仓库默认使用 `assets/yolov8_640x480.xml`。原始的 `416 x 416` IR 保留为
+`assets/yolov8_416x416.xml`，仅用于追溯和重新转换，不能直接用于当前程序。需要重新生成
+`640 x 480` IR 时执行：
+
+```bash
+.venv-openvino/bin/python tools/convert_yolov8_640x480.py
+```
+
+相机采集分辨率和网络输入分辨率是两个概念：实车图像会按比例缩放并在右侧或下方补黑到
+`640 x 480`；Gazebo 图像本身就是 `640 x 480`，因此直接进入网络而不缩放。
+
 ### 编译
 
 ```bash
@@ -94,12 +106,14 @@ v0.1 仓库中未包含回放视频和对应的位姿文本。
 ### 安全事项与当前限制
 
 - `[planner].auto_fire` 默认为 `false`。只有在测试台上确认串口协议、坐标系约定、MPC 输出和标定参数正确后才能启用。
-- 相机来源、分辨率和帧率在 `config/auto_aim.toml` 的 `[camera]` 配置段中设置。
+- 相机来源、分辨率和帧率在 `config/auto_aim.toml` 的 `[camera]` 配置段中设置；相机后端会把请求值限制在 `1–200 FPS`，0 或负值按 200 FPS 处理。
 - 兵种优先级由 `[tracker].priority_mode` 选择：模式 1 优先攻击 3/4 号，模式 2 优先攻击 2 号。
 - v0.1 不包含 YOLOv5 和 YOLO11，唯一可选的检测后端是 YOLOv8。
 - 切换到能量机关模式不会启动能量机关检测器，程序只会发送禁用控制的指令。
 
 模块边界和验证要求见 `app/auto_aim/README.md`；已知风险、代码评审和后续规划见 `docs/auto_aim_v0.1_review.md`。
+Gazebo 双仓库部署、完整参数说明和故障排查见仿真仓库中的
+`docs/ROBOCORE_GAZEBO_DEPLOYMENT.zh-CN.md`。
 
 ### 海康相机 USB 权限规则
 
