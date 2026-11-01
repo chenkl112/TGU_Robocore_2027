@@ -1,136 +1,97 @@
 # TGU Robocore 2027
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+面向联盟赛机器人装甲板的实验性自瞄程序，基于 Robocore 框架，使用 YOLOv8、整车 EKF 和 TinyMPC 完成检测、跟踪与云台控制。实车标定和闭环验证仍需在实际设备上完成。
 
-## Armor auto-aim v0.1
+[简体中文](README.md) | [English](README.en.md)
 
-This branch provides the first Robocore-integrated armor auto-aim baseline for
-alliance matches. It detects and tracks robot armor only. Outpost, base and
-energy-mechanism targets are outside the v0.1 scope.
-
-The armor pipeline is:
+当前分支为 `auto-aim-v0.1`，支持英雄、工程、步兵和哨兵，不处理前哨站、基地和能量机关。
 
 ```text
-USB camera -> YOLOv8 -> armor classifier -> PnP/yaw optimization
-           -> tracker/EKF -> Planner trajectory -> TinyMPC -> gimbal command
+USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
+         → 整车 EKF → Planner 目标轨迹 → TinyMPC → 云台指令
 ```
 
-The implementation is adapted from TongjiSuperPower `sp_vision_25`. Its MIT
-license is retained in `LICENSES/sp_vision_25-MIT.txt`.
+## 编译与自检
 
-### v0.1 scope
+以下命令在本分支的仓库根目录执行。需要 Ubuntu 24.04 或能提供 GCC 13+ 的 Linux 环境，编译器须支持 C++20 的 `std::format`。
 
-- YOLOv8 armor detection with OpenVINO.
-- Fixed `640 x 480` YOLOv8 network input and `1 x 14 x 6300` output, both
-  validated when the detector starts.
-- Robot targets: hero, engineer, infantry and sentry.
-- PnP pose solving and armor yaw optimization.
-- Whole-vehicle EKF tracking and the original `standard_mpc` Planner/TinyMPC
-  angle, angular-velocity and angular-acceleration control.
-- Both original `sp_vision_25` robot-priority modes and higher-priority target
-  switching.
-- Existing Robocore serial, logger, TOML and Foxglove infrastructure retained.
-- No outpost targeting and no energy-mechanism algorithm.
-- Automatic fire is disabled by default. When enabled, MPC checks the error
-  between its reference and solved trajectories.
+1. 安装系统依赖，包括 CMake 3.16+、OpenCV、Eigen3、Boost.System 和 Aravis 0.8：
 
-### Dependencies
+   ```bash
+   sudo apt update
+   sudo apt install -y build-essential cmake ninja-build pkg-config g++ \
+     python3-venv python3-pip libboost-all-dev libopencv-dev \
+     libeigen3-dev libaravis-dev aravis-tools aravis-tools-cli libusb-1.0-0-dev
+   ```
 
-- Ubuntu 24.04 or a distribution providing GCC 13+
-- CMake 3.16+
-- C++20 compiler with `std::format` support (GCC 13+ recommended)
-- Boost.System
-- OpenCV
-- Eigen3
-- OpenVINO Runtime development package
-- Aravis 0.8
+2. 安装仓库固定版本的 OpenVINO：
 
-For the dependencies available from Ubuntu:
+   ```bash
+   python3 -m venv .venv-openvino
+   .venv-openvino/bin/python -m pip install -r requirements-openvino.txt
+   ```
 
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake ninja-build g++ \
-  python3-venv python3-pip libboost-all-dev libopencv-dev \
-  libeigen3-dev libaravis-dev aravis-tools aravis-tools-cli \
-  libusb-1.0-0-dev
-```
+   CMake 会从这个虚拟环境查找 OpenVINO。使用系统安装时，在下面的配置命令中添加 `-DOpenVINO_DIR=软件包的cmake目录`。
 
-Install the pinned OpenVINO build in a project-local virtual environment. The
-2026.3 wheel uses the same libstdc++ ABI as Ubuntu 24.04's OpenCV packages and
-can load the checked-in OpenVINO 2024 IR model.
+3. 编译并运行不依赖相机、串口的 MPC 数值自检：
 
-```bash
-python3 -m venv .venv-openvino
-.venv-openvino/bin/python -m pip install -r requirements-openvino.txt
-```
+   ```bash
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+   cmake --build build -j
+   ./build/planner_test --config-path=config/auto_aim.toml
+   ```
 
-CMake automatically discovers this local installation. To use an official
-system installation instead, pass its package directory explicitly with
-`-DOpenVINO_DIR=/path/to/openvino/cmake`.
+   自检成功时返回 0，并输出角度、角速度和角加速度。它只检查能否生成有限的控制量，不代表检测、跟踪或实车闭环已经通过验证。
 
-The default model is `assets/yolov8_640x480.xml`. The original `416 x 416` IR
-is retained as `assets/yolov8_416x416.xml` for provenance and conversion only;
-the current detector rejects it. Regenerate the `640 x 480` IR with:
+## 实车运行
 
-```bash
-.venv-openvino/bin/python tools/convert_yolov8_640x480.py
-```
-
-Camera capture size and network input size are separate. Hardware frames are
-aspect-preserving resized and padded on the right or bottom to `640 x 480`.
-Gazebo already supplies `640 x 480`, so its frames enter the network unscaled.
-
-### Build
-
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-### Run
-
-Review `config/auto_aim.toml` first. The checked-in calibration is a migration
-reference and must be replaced with calibration from the actual camera/gimbal
-pair.
+先修改 [config/auto_aim.toml](config/auto_aim.toml)，替换相机内参、畸变和相机到云台外参，并核对串口协议。仓库中的标定值仅供迁移参考。
 
 ```bash
 ./build/auto_aim_sentry config/auto_aim.toml
 ```
 
-Offline replay:
+程序会先打开云台串口，再打开相机；缺少设备或串口权限时无法完成启动。常用配置如下：
+
+| 配置项 | 默认值 | 用途 |
+|---|---|---|
+| `camera.source` | `0` | 相机索引，也可填写设备路径、视频文件或流地址 |
+| `camera.width` / `camera.height` | `0` / `0` | 使用相机默认采集分辨率 |
+| `camera.fps` | `200.0` | 请求帧率；后端限制在 1–200 FPS，非正值按 200 处理 |
+| `tracker.enemy_color` | `red` | 敌方颜色，运行前按己方阵营检查 |
+| `tracker.priority_mode` | `1` | 模式 1 优先 3/4 号，模式 2 优先 2 号 |
+| `gimbal.com_port` | `/dev/ttyUSB0` | 云台串口设备 |
+| `planner.auto_fire` | `false` | 自动开火开关 |
+
+自动开火保持关闭，直到串口协议、坐标方向、标定和 MPC 输出都已在测试台上确认。正式入口使用 Planner/TinyMPC；`Aimer`、`Shooter` 保留在源码中，当前入口不调用它们。
+
+## 离线回放与仿真
+
+离线回放需要同名前缀的 `.avi` 视频和 `.txt` 位姿记录，仓库没有附带录包。将 `REPLAY_PREFIX` 设置为自己的录包前缀，运行前确认两个文件都存在：
 
 ```bash
-./build/auto_aim_test --config-path=config/auto_aim.toml assets/demo/demo
+: "${REPLAY_PREFIX:?请先设置录包路径前缀，不含扩展名}"
+test -f "${REPLAY_PREFIX}.avi" && test -f "${REPLAY_PREFIX}.txt" && \
+  ./build/auto_aim_test --config-path=config/auto_aim.toml "$REPLAY_PREFIX"
 ```
 
-Hardware-independent MPC numeric smoke test:
+Gazebo 入口为 `build/gazebo_auto_aim`，配置在 [config/gazebo_auto_aim.toml](config/gazebo_auto_aim.toml)。它需要另行启动兼容的 TCP 仿真桥；本仓库不包含仿真场景或桥接程序。帧格式和连接逻辑见 [task/gazebo_auto_aim.cpp](task/gazebo_auto_aim.cpp)。仿真配置启用了自动开火，不应直接拿来运行实车。
+
+## 检测模型
+
+默认模型为 [assets/yolov8_640x480.xml](assets/yolov8_640x480.xml) 及其同名 `.bin` 权重。检测器启动时校验输入 `640 × 480` 和输出 `1 × 14 × 6300`，目前只支持 YOLOv8。
+
+相机采集分辨率可以与模型输入不同：图像按比例缩放后，在右侧或下方补黑到 `640 × 480`。原始 `416 × 416` IR 仅用于追溯和转换，不能直接交给当前检测器。需要重新转换时执行：
 
 ```bash
-./build/planner_test --config-path=config/auto_aim.toml
+.venv-openvino/bin/python tools/convert_yolov8_640x480.py
 ```
 
-Replay video and pose text are not bundled in v0.1.
+转换会覆盖默认的 `640 × 480` 模型，并用 CPU 做一次零输入推理检查。
 
-### Safety and limitations
+## 海康相机 USB 权限
 
-- `[planner].auto_fire` defaults to `false`. Enable it only after verifying the
-  serial protocol, coordinate convention, MPC outputs and calibration on a test rig.
-- Camera source, requested resolution and frame rate are configured under
-  `[camera]` in `config/auto_aim.toml`. The camera backend clamps requests to
-  `1-200 FPS`; zero or negative values select the 200 FPS upper limit.
-- Select the original robot-priority strategy with `[tracker].priority_mode`:
-  mode 1 prioritizes robots 3/4, while mode 2 prioritizes robot 2.
-- YOLOv5 and YOLO11 are not included in v0.1; YOLOv8 is the only selectable
-  detector backend.
-- Entering a buff mode does not run a buff detector; the program sends a
-  disabled control command instead.
-
-See `app/auto_aim/README.md` for module boundaries and validation targets, and
-`docs/auto_aim_v0.1_review.md` for the Chinese review, known risks and roadmap.
-
-### Existing Hikrobot USB rule
-
-The original framework's Hikrobot camera test may require:
+原框架的海康相机测试可能需要以下 udev 规则：
 
 ```bash
 sudo tee /etc/udev/rules.d/99-hikrobot.rules <<'EOF'
@@ -139,3 +100,9 @@ EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
+
+## 代码与模型来源
+
+自瞄实现改编自 TongjiSuperPower 的 `sp_vision_25`，原 MIT 许可证保留在 [LICENSES/sp_vision_25-MIT.txt](LICENSES/sp_vision_25-MIT.txt)。模型另有许可信息，见 [第三方说明](LICENSES/README.md)；该 MIT 许可证不代表仓库所有内容均采用 MIT。
+
+模块划分、坐标和单位约定见 [自瞄模块说明](app/auto_aim/README.md)。实机验证缺口和后续计划见 [v0.1 评审](docs/auto_aim_v0.1_review.md)。

@@ -1,123 +1,97 @@
 # TGU Robocore 2027
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+面向联盟赛机器人装甲板的实验性自瞄程序，基于 Robocore 框架，使用 YOLOv8、整车 EKF 和 TinyMPC 完成检测、跟踪与云台控制。实车标定和闭环验证仍需在实际设备上完成。
 
-## 装甲板自瞄 v0.1
+[简体中文](README.md) | [English](README.en.md)
 
-本分支提供首个适配 Robocore 框架的联盟赛装甲板自瞄基线。当前版本只检测和跟踪机器人装甲板，不包含前哨站、基地和能量机关目标。
-
-装甲板自瞄处理流程：
+当前分支为 `auto-aim-v0.1`，支持英雄、工程、步兵和哨兵，不处理前哨站、基地和能量机关。
 
 ```text
-USB 相机 -> YOLOv8 -> 装甲板数字分类 -> PnP/装甲板朝向角优化
-         -> 目标跟踪/EKF -> Planner 目标轨迹 -> TinyMPC -> 云台控制指令
+USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
+         → 整车 EKF → Planner 目标轨迹 → TinyMPC → 云台指令
 ```
 
-本实现改编自 TongjiSuperPower 的 `sp_vision_25`。原项目的 MIT 许可证保留在 `LICENSES/sp_vision_25-MIT.txt`。
+## 编译与自检
 
-### v0.1 功能范围
+以下命令在本分支的仓库根目录执行。需要 Ubuntu 24.04 或能提供 GCC 13+ 的 Linux 环境，编译器须支持 C++20 的 `std::format`。
 
-- 使用 OpenVINO 运行 YOLOv8 装甲板检测。
-- YOLOv8 网络输入固定为 `640 x 480`，输出为 `1 x 14 x 6300`；启动时会校验模型形状。
-- 支持英雄、工程、步兵和哨兵机器人目标。
-- 支持 PnP 位姿解算和装甲板朝向角优化。
-- 支持整车 EKF 跟踪和原版 `standard_mpc` 的 Planner/TinyMPC 角度、角速度、角加速度控制。
-- 保留原版 `sp_vision_25` 的两套兵种优先级和高优先级目标切换规则。
-- 保留 Robocore 原有的串口、日志、TOML 和 Foxglove 基础设施。
-- 不包含前哨站瞄准和能量机关算法。
-- 自动开火默认关闭；启用后由 MPC 预测轨迹与求解轨迹的误差判定。
+1. 安装系统依赖，包括 CMake 3.16+、OpenCV、Eigen3、Boost.System 和 Aravis 0.8：
 
-### 环境依赖
+   ```bash
+   sudo apt update
+   sudo apt install -y build-essential cmake ninja-build pkg-config g++ \
+     python3-venv python3-pip libboost-all-dev libopencv-dev \
+     libeigen3-dev libaravis-dev aravis-tools aravis-tools-cli libusb-1.0-0-dev
+   ```
 
-- Ubuntu 24.04，或其他提供 GCC 13 及以上版本的发行版
-- CMake 3.16 及以上版本
-- 支持 `std::format` 的 C++20 编译器，推荐 GCC 13 及以上版本
-- Boost.System
-- OpenCV
-- Eigen3
-- OpenVINO Runtime 开发包
-- Aravis 0.8
+2. 安装仓库固定版本的 OpenVINO：
 
-在 Ubuntu 上安装系统依赖：
+   ```bash
+   python3 -m venv .venv-openvino
+   .venv-openvino/bin/python -m pip install -r requirements-openvino.txt
+   ```
 
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake ninja-build g++ \
-  python3-venv python3-pip libboost-all-dev libopencv-dev \
-  libeigen3-dev libaravis-dev aravis-tools aravis-tools-cli \
-  libusb-1.0-0-dev
-```
+   CMake 会从这个虚拟环境查找 OpenVINO。使用系统安装时，在下面的配置命令中添加 `-DOpenVINO_DIR=软件包的cmake目录`。
 
-在项目目录中创建独立的 Python 虚拟环境，并安装固定版本的 OpenVINO。OpenVINO 2026.3 wheel 与 Ubuntu 24.04 的 OpenCV 软件包使用相同的 libstdc++ ABI，同时可以加载仓库中由 OpenVINO 2024 生成的 IR 模型。
+3. 编译并运行不依赖相机、串口的 MPC 数值自检：
 
-```bash
-python3 -m venv .venv-openvino
-.venv-openvino/bin/python -m pip install -r requirements-openvino.txt
-```
+   ```bash
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+   cmake --build build -j
+   ./build/planner_test --config-path=config/auto_aim.toml
+   ```
 
-CMake 会自动发现上述项目本地安装。如果需要使用系统中的 OpenVINO，可以手动指定其 CMake 软件包目录：
+   自检成功时返回 0，并输出角度、角速度和角加速度。它只检查能否生成有限的控制量，不代表检测、跟踪或实车闭环已经通过验证。
 
-```bash
-cmake -S . -B build -DOpenVINO_DIR=/path/to/openvino/cmake
-```
+## 实车运行
 
-仓库默认使用 `assets/yolov8_640x480.xml`。原始的 `416 x 416` IR 保留为
-`assets/yolov8_416x416.xml`，仅用于追溯和重新转换，不能直接用于当前程序。需要重新生成
-`640 x 480` IR 时执行：
-
-```bash
-.venv-openvino/bin/python tools/convert_yolov8_640x480.py
-```
-
-相机采集分辨率和网络输入分辨率是两个概念：实车图像会按比例缩放并在右侧或下方补黑到
-`640 x 480`；Gazebo 图像本身就是 `640 x 480`，因此直接进入网络而不缩放。
-
-### 编译
-
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-### 运行
-
-运行前请先检查 `config/auto_aim.toml`。仓库中的标定参数仅作为迁移参考，必须替换为实际相机和云台组合的标定结果。
-
-启动实车程序：
+先修改 [config/auto_aim.toml](config/auto_aim.toml)，替换相机内参、畸变和相机到云台外参，并核对串口协议。仓库中的标定值仅供迁移参考。
 
 ```bash
 ./build/auto_aim_sentry config/auto_aim.toml
 ```
 
-运行离线回放：
+程序会先打开云台串口，再打开相机；缺少设备或串口权限时无法完成启动。常用配置如下：
+
+| 配置项 | 默认值 | 用途 |
+|---|---|---|
+| `camera.source` | `0` | 相机索引，也可填写设备路径、视频文件或流地址 |
+| `camera.width` / `camera.height` | `0` / `0` | 使用相机默认采集分辨率 |
+| `camera.fps` | `200.0` | 请求帧率；后端限制在 1–200 FPS，非正值按 200 处理 |
+| `tracker.enemy_color` | `red` | 敌方颜色，运行前按己方阵营检查 |
+| `tracker.priority_mode` | `1` | 模式 1 优先 3/4 号，模式 2 优先 2 号 |
+| `gimbal.com_port` | `/dev/ttyUSB0` | 云台串口设备 |
+| `planner.auto_fire` | `false` | 自动开火开关 |
+
+自动开火保持关闭，直到串口协议、坐标方向、标定和 MPC 输出都已在测试台上确认。正式入口使用 Planner/TinyMPC；`Aimer`、`Shooter` 保留在源码中，当前入口不调用它们。
+
+## 离线回放与仿真
+
+离线回放需要同名前缀的 `.avi` 视频和 `.txt` 位姿记录，仓库没有附带录包。将 `REPLAY_PREFIX` 设置为自己的录包前缀，运行前确认两个文件都存在：
 
 ```bash
-./build/auto_aim_test --config-path=config/auto_aim.toml assets/demo/demo
+: "${REPLAY_PREFIX:?请先设置录包路径前缀，不含扩展名}"
+test -f "${REPLAY_PREFIX}.avi" && test -f "${REPLAY_PREFIX}.txt" && \
+  ./build/auto_aim_test --config-path=config/auto_aim.toml "$REPLAY_PREFIX"
 ```
 
-运行不依赖硬件的 MPC 数值自检：
+Gazebo 入口为 `build/gazebo_auto_aim`，配置在 [config/gazebo_auto_aim.toml](config/gazebo_auto_aim.toml)。它需要另行启动兼容的 TCP 仿真桥；本仓库不包含仿真场景或桥接程序。帧格式和连接逻辑见 [task/gazebo_auto_aim.cpp](task/gazebo_auto_aim.cpp)。仿真配置启用了自动开火，不应直接拿来运行实车。
+
+## 检测模型
+
+默认模型为 [assets/yolov8_640x480.xml](assets/yolov8_640x480.xml) 及其同名 `.bin` 权重。检测器启动时校验输入 `640 × 480` 和输出 `1 × 14 × 6300`，目前只支持 YOLOv8。
+
+相机采集分辨率可以与模型输入不同：图像按比例缩放后，在右侧或下方补黑到 `640 × 480`。原始 `416 × 416` IR 仅用于追溯和转换，不能直接交给当前检测器。需要重新转换时执行：
 
 ```bash
-./build/planner_test --config-path=config/auto_aim.toml
+.venv-openvino/bin/python tools/convert_yolov8_640x480.py
 ```
 
-v0.1 仓库中未包含回放视频和对应的位姿文本。
+转换会覆盖默认的 `640 × 480` 模型，并用 CPU 做一次零输入推理检查。
 
-### 安全事项与当前限制
+## 海康相机 USB 权限
 
-- `[planner].auto_fire` 默认为 `false`。只有在测试台上确认串口协议、坐标系约定、MPC 输出和标定参数正确后才能启用。
-- 相机来源、分辨率和帧率在 `config/auto_aim.toml` 的 `[camera]` 配置段中设置；相机后端会把请求值限制在 `1–200 FPS`，0 或负值按 200 FPS 处理。
-- 兵种优先级由 `[tracker].priority_mode` 选择：模式 1 优先攻击 3/4 号，模式 2 优先攻击 2 号。
-- v0.1 不包含 YOLOv5 和 YOLO11，唯一可选的检测后端是 YOLOv8。
-- 切换到能量机关模式不会启动能量机关检测器，程序只会发送禁用控制的指令。
-
-模块边界和验证要求见 `app/auto_aim/README.md`；已知风险、代码评审和后续规划见 `docs/auto_aim_v0.1_review.md`。
-Gazebo 双仓库部署、完整参数说明和故障排查见仿真仓库中的
-`docs/ROBOCORE_GAZEBO_DEPLOYMENT.zh-CN.md`。
-
-### 海康相机 USB 权限规则
-
-运行原框架中的海康相机测试时，可能需要配置以下 udev 规则：
+原框架的海康相机测试可能需要以下 udev 规则：
 
 ```bash
 sudo tee /etc/udev/rules.d/99-hikrobot.rules <<'EOF'
@@ -126,3 +100,9 @@ EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
+
+## 代码与模型来源
+
+自瞄实现改编自 TongjiSuperPower 的 `sp_vision_25`，原 MIT 许可证保留在 [LICENSES/sp_vision_25-MIT.txt](LICENSES/sp_vision_25-MIT.txt)。模型另有许可信息，见 [第三方说明](LICENSES/README.md)；该 MIT 许可证不代表仓库所有内容均采用 MIT。
+
+模块划分、坐标和单位约定见 [自瞄模块说明](app/auto_aim/README.md)。实机验证缺口和后续计划见 [v0.1 评审](docs/auto_aim_v0.1_review.md)。
