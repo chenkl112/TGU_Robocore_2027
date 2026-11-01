@@ -1,0 +1,16 @@
+# 发布扫描例外
+
+逐项核对后保留以下内容；例外不适用于密钥、凭据或实际设备数据。
+
+| 位置 / 范围 | 保留原因 |
+|---|---|
+| CMakeLists.txt:2；README.md、README.zh-CN.md、README.en.md 的项目标题 | 公开项目名称，不是本机用户名或私有环境依赖。 |
+| app/auto_aim、io、tools 下头文件中的 TGU_ROBOCORE_2027 保护宏 | 防止重复包含的项目命名空间，改变它们不改善可移植性。 |
+| LICENSES/README.md:3；LICENSES/sp_vision_25-MIT.txt:3；各 README 的上游署名 | 公开上游项目归属及版权通知，需要保留。 |
+| 项目结构与代码风格.md 中的项目名和公开上游引用 | 框架结构和已有公开项目的说明，不是私人文档入口。 |
+| config/gazebo_auto_aim.toml 的预览文件名；task/gazebo_auto_aim.cpp 中的同名默认值 | 仓库相对输出路径，和本机账号、主机无关。 |
+| tools/foxglove/include/foxglove/expected.hpp:3 | 第三方版权通知中的公开作者联系方式，应随原许可保留。 |
+| tools/tomlpp.hpp:28 | 第三方库的公开版权与作者通知，应保留。 |
+| tools/tomlpp.hpp:9084 | 内嵌 UTF-8 解码器的版权与作者通知，应保留。 |
+
+二进制模型和 Foxglove 库属于恢复分支原有文件；本次没有新增或替换它们。二进制内容未纳入文本密钥扫描。

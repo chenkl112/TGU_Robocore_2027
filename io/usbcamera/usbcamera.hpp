@@ -17,7 +17,7 @@ namespace io {
 // 用法:
 //   io::USBCamera cam(0);                               // 用 /dev/video0
 //   io::USBCamera cam("/dev/video2");                   // 用指定设备路径
-//   io::USBCamera cam("rtsp://192.168.1.10/stream");    // 网络流
+//   io::USBCamera cam("rtsp://192.0.2.1/stream");      // 网络流（文档示例地址）
 //   io::USBCamera cam("test.mp4");                      // 视频文件
 //
 //   cv::Mat img;

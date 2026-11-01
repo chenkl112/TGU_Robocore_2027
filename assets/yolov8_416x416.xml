@@ -25171,7 +25171,7 @@
 			<author value="Ultralytics" />
 			<batch value="1" />
 			<date value="2024-05-16T18:55:36.552941" />
-			<description value="Ultralytics YOLOv8_large_MobileNetV3-pose model trained on C:\Users\ssq13\Desktop\yolov8_pose_mobilenetv3\ultralytics\ultralytics\cfg\datasets\coco8-pose.yaml" />
+			<description value="Ultralytics YOLOv8_large_MobileNetV3-pose model trained on coco8-pose.yaml" />
 			<imgsz value="[416, 416]" />
 			<kpt_shape value="[4, 2]" />
 			<license value="AGPL-3.0 https://ultralytics.com/license" />
