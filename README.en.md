@@ -65,7 +65,7 @@ The program opens the gimbal serial port before the camera. Missing devices or s
 
 Keep automatic fire disabled until the serial protocol, coordinate signs, calibration and MPC outputs have been checked on a test rig. The hardware entry point uses Planner/TinyMPC. `Aimer` and `Shooter` remain in the source but are not called by this entry point.
 
-## Offline replay and simulation
+## Offline replay
 
 Replay requires an `.avi` video and a `.txt` pose record sharing the same prefix. Recordings are not bundled. Set `REPLAY_PREFIX` to your recording prefix, then check that both files exist:
 
@@ -74,8 +74,6 @@ Replay requires an `.avi` video and a `.txt` pose record sharing the same prefix
 test -f "${REPLAY_PREFIX}.avi" && test -f "${REPLAY_PREFIX}.txt" && \
   ./build/auto_aim_test --config-path=config/auto_aim.toml "$REPLAY_PREFIX"
 ```
-
-The Gazebo executable is `build/gazebo_auto_aim`, configured by [config/gazebo_auto_aim.toml](config/gazebo_auto_aim.toml). It needs a compatible TCP simulation bridge running separately; the simulator scene and bridge are not included here. See [task/gazebo_auto_aim.cpp](task/gazebo_auto_aim.cpp) for the frame format and connection logic. The simulation configuration enables automatic fire and should not be used as a hardware configuration.
 
 ## Detection models
 

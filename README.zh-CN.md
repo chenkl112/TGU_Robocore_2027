@@ -65,7 +65,7 @@ USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
 
 自动开火保持关闭，直到串口协议、坐标方向、标定和 MPC 输出都已在测试台上确认。正式入口使用 Planner/TinyMPC；`Aimer`、`Shooter` 保留在源码中，当前入口不调用它们。
 
-## 离线回放与仿真
+## 离线回放
 
 离线回放需要同名前缀的 `.avi` 视频和 `.txt` 位姿记录，仓库没有附带录包。将 `REPLAY_PREFIX` 设置为自己的录包前缀，运行前确认两个文件都存在：
 
@@ -74,8 +74,6 @@ USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
 test -f "${REPLAY_PREFIX}.avi" && test -f "${REPLAY_PREFIX}.txt" && \
   ./build/auto_aim_test --config-path=config/auto_aim.toml "$REPLAY_PREFIX"
 ```
-
-Gazebo 入口为 `build/gazebo_auto_aim`，配置在 [config/gazebo_auto_aim.toml](config/gazebo_auto_aim.toml)。它需要另行启动兼容的 TCP 仿真桥；本仓库不包含仿真场景或桥接程序。帧格式和连接逻辑见 [task/gazebo_auto_aim.cpp](task/gazebo_auto_aim.cpp)。仿真配置启用了自动开火，不应直接拿来运行实车。
 
 ## 检测模型
 

@@ -121,13 +121,11 @@ bool Solver::solve(Armor& armor) const {
 }
 
 std::vector<cv::Point2f> Solver::reproject_armor(
-    const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type,
-    ArmorName name) const {
+    const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type) const {
     auto sin_yaw = std::sin(yaw);
     auto cos_yaw = std::cos(yaw);
 
-    const double pitch =
-        (name == ArmorName::outpost ? -15.0 : 15.0) * CV_PI / 180.0;
+    constexpr double pitch = 15.0 * CV_PI / 180.0;
     auto sin_pitch = std::sin(pitch);
     auto cos_pitch = std::cos(pitch);
 
@@ -180,8 +178,7 @@ void Solver::optimize_yaw(Armor& armor) const {
 }
 
 double Solver::armor_reprojection_error(const Armor& armor, double yaw) const {
-    auto image_points =
-        reproject_armor(armor.xyz_in_world, yaw, armor.type, armor.name);
+    auto image_points = reproject_armor(armor.xyz_in_world, yaw, armor.type);
     auto error = 0.0;
     for (int i = 0; i < 4; i++) error += cv::norm(armor.points[i] - image_points[i]);
     return error;
