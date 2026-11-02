@@ -69,6 +69,8 @@ enemy_color = "red"
 priority_mode = 1
 min_detect_count = 5
 max_temp_lost_count = 25
+# Maximum spatial residual (metres) for associating a same-ID armor.
+max_match_distance = 0.5
 
 [aimer]
 yaw_offset = -0.8
@@ -87,6 +89,8 @@ judge_distance = 3.0
 auto_fire = false
 
 [planner]
+# Reject targets older than this many seconds, including camera/inference stalls.
+max_target_age = 0.1
 # 参数移植自 sp_vision_25 standard_mpc，偏移和延迟仍需实车标定。
 yaw_offset = -0.8
 pitch_offset = -1.0
@@ -106,3 +110,5 @@ auto_fire = false
 [gimbal]
 com_port = "/dev/ttyUSB0"
 baudrate = 115200
+# Treat silent feedback as IDLE; a resumed stream starts a new tracking session.
+feedback_timeout_ms = 100

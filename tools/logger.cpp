@@ -4,11 +4,13 @@
 
 #include "logger.hpp"
 
+#include <cerrno>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <system_error>
 
 namespace tools {
     Logger &Logger::instance() {
@@ -25,14 +27,25 @@ namespace tools {
     void Logger::init(const LoggerConfig &config) {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        if (ofs_.is_open()) {
+            ofs_.close();
+        }
+        ofs_.clear();
+
         level_ = config.level;
         console_ = config.enable_console;
         file_ = config.enable_file;
 
         if (file_) {
+            errno = 0;
             ofs_.open(config.file_path, std::ios::out | std::ios::app);
-            if (!ofs_.is_open()) {
+            const int open_error = errno;
+            if (!ofs_) {
                 file_ = false;
+                std::cerr << "Logger: cannot open log file '" << config.file_path
+                          << "': " << (open_error
+                              ? std::error_code(open_error, std::generic_category()).message()
+                              : "file stream open failed") << '\n';
             }
         }
     }
@@ -42,9 +55,9 @@ namespace tools {
                      const std::string &msg,
                      const char *file,
                      int line) {
-        if (level < level_) return;
-
         std::lock_guard<std::mutex> lock(mutex_);
+
+        if (level < level_) return;
 
         std::string text = format(level, module, msg, file, line);
 

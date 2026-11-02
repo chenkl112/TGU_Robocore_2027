@@ -4,7 +4,7 @@ An experimental armor auto-aim program for alliance-match robots, built on Roboc
 
 [简体中文](README.md) | [English](README.en.md)
 
-The `auto-aim-v0.1` branch supports hero, engineer, infantry and sentry robots. It does not target outposts, bases or energy mechanisms.
+The auto-aim code is based on `auto-aim-v0.1` and supports hero, engineer, infantry and sentry robots. It does not target outposts, bases or energy mechanisms.
 
 ```text
 USB camera → YOLOv8 → number classification → PnP / armor yaw optimization
@@ -15,7 +15,7 @@ USB camera → YOLOv8 → number classification → PnP / armor yaw optimization
 
 Run these commands from the root of this branch. Use Ubuntu 24.04 or a Linux environment with GCC 13+ and C++20 `std::format` support.
 
-1. Install the system dependencies, including CMake 3.16+, OpenCV, Eigen3, Boost.System and Aravis 0.8:
+1. Install the system dependencies, including CMake 3.20+, OpenCV, Eigen3, Boost.System and Aravis 0.8:
 
    ```bash
    sudo apt update
@@ -37,7 +37,8 @@ Run these commands from the root of this branch. Use Ubuntu 24.04 or a Linux env
 
    ```bash
    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-   cmake --build build -j
+   cmake --build build -j4
+   ctest --test-dir build --output-on-failure -j4
    ./build/planner_test --config-path=config/auto_aim.toml
    ```
 
@@ -104,3 +105,5 @@ sudo udevadm trigger
 The auto-aim implementation is adapted from TongjiSuperPower `sp_vision_25`. Its MIT license is preserved in [LICENSES/sp_vision_25-MIT.txt](LICENSES/sp_vision_25-MIT.txt). Model licensing is documented separately in the [third-party notices](LICENSES/README.md); the upstream MIT license does not license every file in this repository.
 
 See the [auto-aim module notes](app/auto_aim/README.md) for module boundaries, coordinates and units, and the [v0.1 review](docs/auto_aim_v0.1_review.md) for validation gaps and planned work.
+
+The [2026-11-02 review report](docs/review_2026-11-02.md) records the P1 fixes and regression checks.

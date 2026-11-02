@@ -75,6 +75,9 @@ std::list<Armor> YOLOV8::detect(const cv::Mat& raw_img, int frame_count) {
         return std::list<Armor>();
     }
 
+    if (raw_img.type() != CV_8UC3) {
+        throw std::invalid_argument("YOLO expects an 8-bit BGR image");
+    }
     cv::Mat bgr_img;
     if (use_roi_) {
         if (roi_.width < 0) roi_.width = raw_img.cols - roi_.x;

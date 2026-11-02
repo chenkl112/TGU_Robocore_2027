@@ -34,6 +34,7 @@ public:
     ~USBCamera();
 
     void read(cv::Mat& img, std::chrono::steady_clock::time_point& timestamp);
+    void stop();
     bool ok() const { return ok_; }
 
 private:

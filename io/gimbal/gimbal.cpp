@@ -6,7 +6,6 @@
 
 #include "tools/crc.hpp"
 #include "tools/logger.hpp"
-#include "tools/math_tools.hpp"
 #include "tools/tomlpp.hpp"
 
 namespace io {
@@ -17,6 +16,10 @@ Gimbal::Gimbal(const std::string& config_path) {
     auto config = toml::parse_file(config_path);
     auto com_port = std::string{config["gimbal"]["com_port"].value_or("/dev/ttyUSB0")};
     auto baudrate = config["gimbal"]["baudrate"].value_or(115200);
+
+    const int timeout_ms = config["gimbal"]["feedback_timeout_ms"].value_or(100);
+    if (timeout_ms <= 0) throw std::runtime_error("gimbal.feedback_timeout_ms must be positive");
+    feedback_timeout_ = std::chrono::milliseconds(timeout_ms);
 
     if (!serial_.open(com_port, baudrate)) {
         LOG_ERROR(MODULE, "[Gimbal] Failed to open serial: {}", com_port);
@@ -32,6 +35,7 @@ Gimbal::Gimbal(const std::string& config_path) {
         lock.unlock();
         quit_ = true;
         serial_.close();
+        pose_cv_.notify_all();
         if (thread_.joinable()) thread_.join();
         LOG_ERROR(MODULE, "[Gimbal] Timed out waiting for the first valid packet");
         throw std::runtime_error("timed out waiting for the first valid gimbal packet");
@@ -40,19 +44,36 @@ Gimbal::Gimbal(const std::string& config_path) {
 }
 
 Gimbal::~Gimbal() {
+    send(false, false, 0, 0, 0, 0, 0, 0);
     quit_ = true;
     serial_.close();
+    pose_cv_.notify_all();
     if (thread_.joinable()) thread_.join();
 }
 
 GimbalMode Gimbal::mode() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return mode_;
+    return feedback_fresh_locked() ? mode_ : GimbalMode::IDLE;
 }
 
 GimbalState Gimbal::state() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return state_;
+}
+
+bool Gimbal::feedback_fresh_locked() const {
+    return first_packet_received_ && serial_.is_open() &&
+           std::chrono::steady_clock::now() - last_packet_ <= feedback_timeout_;
+}
+
+uint64_t Gimbal::session() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return session_;
+}
+
+std::chrono::steady_clock::time_point Gimbal::session_started() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return session_started_;
 }
 
 std::string Gimbal::str(GimbalMode m) const {
@@ -66,33 +87,52 @@ std::string Gimbal::str(GimbalMode m) const {
 }
 
 Eigen::Quaterniond Gimbal::q(std::chrono::steady_clock::time_point t) {
-    while (true) {
-        auto [q_a, t_a] = queue_.pop();
-        auto [q_b, t_b] = queue_.front();
-        if (t <= t_a) return q_a;
-        if (t > t_b) continue;
-
-        const double interval = tools::delta_time(t_b, t_a);
-        const double elapsed = tools::delta_time(t, t_a);
-        const double ratio = interval > 0.0 ? std::clamp(elapsed / interval, 0.0, 1.0) : 0.0;
-        return q_a.slerp(ratio, q_b).normalized();
+    std::unique_lock<std::mutex> lock(mutex_);
+    // Keep history: consuming samples here used to lose bracketing poses when
+    // several camera frames shared the same IMU interval.
+    if (!pose_cv_.wait_for(lock, feedback_timeout_, [&] {
+            return quit_ || !serial_.is_open() ||
+                   (!poses_.empty() && std::get<1>(poses_.back()) >= t);
+        }) || quit_ || !feedback_fresh_locked() || poses_.empty()) {
+        throw std::runtime_error("gimbal pose unavailable or timed out");
     }
+    if (t < std::get<1>(poses_.front())) {
+        throw std::runtime_error("camera timestamp predates gimbal pose history");
+    }
+    auto upper = std::lower_bound(poses_.begin(), poses_.end(), t,
+        [](const auto& pose, auto stamp) { return std::get<1>(pose) < stamp; });
+    if (upper == poses_.begin() || std::get<1>(*upper) == t) return std::get<0>(*upper);
+    const auto& [q_b, t_b] = *upper;
+    const auto& [q_a, t_a] = *std::prev(upper);
+    const double interval = std::chrono::duration<double>(t_b - t_a).count();
+    if (t_b - t_a > feedback_timeout_) {
+        throw std::runtime_error("gimbal pose interval crosses a feedback outage");
+    }
+    const double ratio = std::chrono::duration<double>(t - t_a).count() / interval;
+    return q_a.slerp(ratio, q_b).normalized();
 }
 
 void Gimbal::send(
     bool control, bool fire, float yaw, float yaw_vel, float yaw_acc, float pitch, float pitch_vel,
-    float pitch_acc) {
-    tx_data_.mode = control ? (fire ? 2 : 1) : 0;
-    tx_data_.yaw = yaw;
-    tx_data_.yaw_vel = yaw_vel;
-    tx_data_.yaw_acc = yaw_acc;
-    tx_data_.pitch = pitch;
-    tx_data_.pitch_vel = pitch_vel;
-    tx_data_.pitch_acc = pitch_acc;
-    tx_data_.crc16 = tools::get_crc16(
-        reinterpret_cast<uint8_t*>(&tx_data_), sizeof(tx_data_) - sizeof(tx_data_.crc16));
-
-    serial_.write(reinterpret_cast<uint8_t*>(&tx_data_), sizeof(tx_data_));
+    float pitch_acc, std::optional<uint64_t> expected_session) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const bool finite = std::isfinite(yaw) && std::isfinite(yaw_vel) && std::isfinite(yaw_acc) &&
+                        std::isfinite(pitch) && std::isfinite(pitch_vel) && std::isfinite(pitch_acc);
+    control = control && finite && feedback_fresh_locked() && mode_ == GimbalMode::AUTO_AIM &&
+              (!expected_session || *expected_session == session_);
+    VisionToGimbal packet{};
+    packet.mode = control ? (fire ? 2 : 1) : 0;
+    if (control) {
+        packet.yaw = yaw;
+        packet.yaw_vel = yaw_vel;
+        packet.yaw_acc = yaw_acc;
+        packet.pitch = pitch;
+        packet.pitch_vel = pitch_vel;
+        packet.pitch_acc = pitch_acc;
+    }
+    packet.crc16 = tools::get_crc16(
+        reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - sizeof(packet.crc16));
+    serial_.write(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
 }
 
 void Gimbal::read_thread() {
@@ -110,10 +150,17 @@ void Gimbal::read_thread() {
             LOG_WARN(MODULE, "[Gimbal] Ignoring invalid quaternion");
             return;
         }
+        if (!std::isfinite(pkt.yaw) || !std::isfinite(pkt.pitch) ||
+            !std::isfinite(pkt.yaw_vel) || !std::isfinite(pkt.pitch_vel) ||
+            !std::isfinite(pkt.bullet_speed)) return;
         q.normalize();
-        queue_.push({q, t});
-
         std::lock_guard<std::mutex> lock(mutex_);
+        poses_.push_back({q, t});
+        while (poses_.size() > 1000) poses_.pop_front();
+        pose_cv_.notify_all();
+        const auto previous_mode = mode_;
+        const bool resumed = !first_packet_received_ || t - last_packet_ > feedback_timeout_;
+        last_packet_ = t;
         state_.yaw = pkt.yaw;
         state_.yaw_vel = pkt.yaw_vel;
         state_.pitch = pkt.pitch;
@@ -130,12 +177,17 @@ void Gimbal::read_thread() {
             case 3: mode_ = GimbalMode::BIG_BUFF; break;
             default: mode_ = GimbalMode::IDLE; break;
         }
+        if (resumed || previous_mode != mode_) {
+            ++session_;
+            session_started_ = t;
+        }
     });
 
-    while (!quit_) {
+    while (!quit_ && serial_.is_open()) {
         serial_.spin_once();
     }
 
+    pose_cv_.notify_all();
     LOG_INFO(MODULE, "[Gimbal] read_thread stopped.");
 }
 

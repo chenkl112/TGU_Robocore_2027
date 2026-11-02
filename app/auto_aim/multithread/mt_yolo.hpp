@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <list>
+#include <exception>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <thread>
 #include <tuple>
@@ -36,6 +38,9 @@ public:
 private:
     void worker();
 
+    void check_error();
+    std::mutex error_mutex_;
+    std::exception_ptr error_;
     YOLO yolo_;
 
     // PopWhenFull = true:输入队列满了就丢最老的,保证检测追的是最新画面

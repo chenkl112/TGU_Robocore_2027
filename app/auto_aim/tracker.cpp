@@ -1,6 +1,8 @@
 #include "tracker.hpp"
 
 #include <numeric>
+#include <cmath>
+#include <stdexcept>
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
@@ -40,9 +42,20 @@ Tracker::Tracker(const std::string& config_path, Solver& solver)
     min_detect_count_ = config["tracker"]["min_detect_count"].value_or(3);
     max_temp_lost_count_ = config["tracker"]["max_temp_lost_count"].value_or(10);
     normal_temp_lost_count_ = max_temp_lost_count_;
+    max_match_distance_ = config["tracker"]["max_match_distance"].value_or(0.5);
+    if (min_detect_count_ < 1 || max_temp_lost_count_ < 0 ||
+        !std::isfinite(max_match_distance_) || max_match_distance_ <= 0) {
+        throw std::runtime_error("invalid tracker counts or max_match_distance");
+    }
 }
 
 std::string Tracker::state() const { return state_; }
+
+void Tracker::reset() {
+    state_ = "lost";
+    detect_count_ = temp_lost_count_ = 0;
+    target_ = Target{};
+}
 
 std::list<Target> Tracker::track(
     std::list<Armor>& armors, std::chrono::steady_clock::time_point t,
@@ -50,7 +63,7 @@ std::list<Target> Tracker::track(
     auto dt = tools::delta_time(t, last_timestamp_);
     last_timestamp_ = t;
 
-    if (state_ != "lost" && dt > 0.1) {
+    if (state_ != "lost" && (dt <= 0 || dt > 0.1)) {
         LOG_WARN(MODULE, "Large dt: {:.3f}s", dt);
         state_ = "lost";
     }
@@ -83,6 +96,7 @@ std::list<Target> Tracker::track(
         armors.front().priority < target_.priority) {
         found = set_target(armors, t);
         if (found) {
+            state_ = "lost";  // A new identity must pass detection confirmation again.
             LOG_INFO(
                 MODULE, "Switch to higher-priority target {}",
                 ARMOR_NAMES[armors.front().name]);
@@ -109,7 +123,8 @@ std::list<Target> Tracker::track(
         return {};
     }
 
-    if (state_ == "lost") return {};
+    if (state_ == "lost" || state_ == "detecting") return {};
+    target_.observed = found;
 
     std::list<Target> targets = {target_};
     return targets;
@@ -118,7 +133,7 @@ std::list<Target> Tracker::track(
 void Tracker::state_machine(bool found) {
     if (state_ == "lost") {
         if (!found) return;
-        state_ = "detecting";
+        state_ = min_detect_count_ <= 1 ? "tracking" : "detecting";
         detect_count_ = 1;
     } else if (state_ == "detecting") {
         if (found) {
@@ -182,8 +197,7 @@ bool Tracker::update_target(
         if (armor.name != target_.name || armor.type != target_.armor_type) continue;
 
         if (!solver_.solve(armor)) continue;
-        target_.update(armor);
-        ++solved_count;
+        if (target_.update(armor, max_match_distance_)) ++solved_count;
     }
 
     return solved_count > 0;

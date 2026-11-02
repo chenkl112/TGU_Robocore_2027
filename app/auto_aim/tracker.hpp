@@ -18,12 +18,14 @@ public:
     Tracker(const std::string& config_path, Solver& solver);
 
     std::string state() const;
+    void reset();
 
     std::list<Target> track(
         std::list<Armor>& armors, std::chrono::steady_clock::time_point t,
         bool use_enemy_color = true);
 
 private:
+    double max_match_distance_;
     Solver& solver_;
     Color enemy_color_;
     PriorityMode priority_mode_;

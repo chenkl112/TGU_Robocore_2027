@@ -108,8 +108,10 @@ void Target::predict(double dt) {
     ekf_.predict(F, Q, f);
 }
 
-void Target::update(const Armor& armor) {
-    int id;
+bool Target::update(const Armor& armor, double max_match_distance) {
+    if (!armor.xyz_in_world.allFinite() || !armor.ypr_in_world.allFinite() ||
+        !armor.ypd_in_world.allFinite() || !ekf_.x.allFinite()) return false;
+    int id = -1;
     auto min_angle_error = 1e10;
     const std::vector<Eigen::Vector4d>& xyza_list = armor_xyza_list();
 
@@ -130,6 +132,7 @@ void Target::update(const Armor& armor) {
     const int candidate_count = std::min(3, armor_num_);
     for (int i = 0; i < candidate_count; i++) {
         const auto& xyza = xyza_i_list[i].first;
+        if ((armor.xyz_in_world - xyza.head<3>()).norm() > max_match_distance) continue;
         Eigen::Vector3d ypd = tools::xyz2ypd(xyza.head(3));
         auto angle_error =
             std::abs(tools::limit_rad(armor.ypr_in_world[0] - xyza[3])) +
@@ -141,6 +144,7 @@ void Target::update(const Armor& armor) {
         }
     }
 
+    if (id < 0) return false;
     if (id != 0) jumped = true;
 
     if (id != last_id) {
@@ -155,6 +159,7 @@ void Target::update(const Armor& armor) {
     update_count_++;
 
     update_ypda(armor, id);
+    return true;
 }
 
 void Target::update_ypda(const Armor& armor, int id) {
@@ -207,6 +212,7 @@ std::vector<Eigen::Vector4d> Target::armor_xyza_list() const {
 }
 
 bool Target::diverged() const {
+    if (ekf_.x.size() != 11 || !ekf_.x.allFinite() || !ekf_.P.allFinite()) return true;
     auto r_ok = ekf_.x[8] > 0.05 && ekf_.x[8] < 0.5;
     auto l_ok = ekf_.x[8] + ekf_.x[9] > 0.05 && ekf_.x[8] + ekf_.x[9] < 0.5;
 

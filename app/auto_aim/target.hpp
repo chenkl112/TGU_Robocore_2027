@@ -15,11 +15,12 @@ namespace app::auto_aim {
 
 class Target {
 public:
-    ArmorName name;
-    ArmorType armor_type;
-    ArmorPriority priority;
-    bool jumped;
-    int last_id;
+    bool observed = false;
+    ArmorName name = ArmorName::not_armor;
+    ArmorType armor_type = ArmorType::small;
+    ArmorPriority priority = ArmorPriority::fifth;
+    bool jumped = false;
+    int last_id = 0;
 
     Target() = default;
     Target(
@@ -29,7 +30,8 @@ public:
 
     void predict(std::chrono::steady_clock::time_point t);
     void predict(double dt);
-    void update(const Armor& armor);
+    auto timestamp() const { return t_; }
+    bool update(const Armor& armor, double max_match_distance = 0.5);
 
     Eigen::VectorXd ekf_x() const;
     const tools::ExtendedKalmanFilter& ekf() const;
@@ -41,7 +43,7 @@ public:
     bool checkinit();
 
 private:
-    int armor_num_;
+    int armor_num_ = 0;
     int switch_count_;
     int update_count_;
 

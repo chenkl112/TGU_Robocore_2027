@@ -33,10 +33,14 @@ USBCamera::USBCamera(
 }
 
 USBCamera::~USBCamera() {
-    quit_ = true;
-    frame_cv_.notify_all();
+    stop();
     if (thread_.joinable()) thread_.join();
     if (cap_.isOpened()) cap_.release();
+}
+
+void USBCamera::stop() {
+    quit_ = true;
+    frame_cv_.notify_all();
 }
 
 void USBCamera::open(
@@ -46,7 +50,15 @@ void USBCamera::open(
         opened = cap_.open(std::get<int>(src), cv::CAP_V4L2);
         if (!opened) opened = cap_.open(std::get<int>(src));
     } else {
-        opened = cap_.open(std::get<std::string>(src));
+        const auto& path = std::get<std::string>(src);
+        if (path.starts_with("/dev/video")) {
+            opened = cap_.open(path, cv::CAP_V4L2);
+        } else {
+            // FFmpeg accepts these at open time, including for RTSP/HTTP reads.
+            opened = cap_.open(path, cv::CAP_FFMPEG,
+                               {cv::CAP_PROP_OPEN_TIMEOUT_MSEC, 1000,
+                                cv::CAP_PROP_READ_TIMEOUT_MSEC, 500});
+        }
     }
 
     if (!opened) {
@@ -68,46 +80,60 @@ void USBCamera::open(
 
 void USBCamera::capture_thread() {
     while (!quit_) {
-        if (!cap_.isOpened()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            open(source_, width_, height_, fps_);
-            continue;
-        }
+        try {
+            if (!cap_.isOpened()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                open(source_, width_, height_, fps_);
+                continue;
+            }
 
-        const auto capture_started = std::chrono::steady_clock::now();
-        cv::Mat img;
-        bool got = cap_.read(img);
-        auto t = std::chrono::steady_clock::now();
+            const auto capture_started = std::chrono::steady_clock::now();
+            cv::Mat img;
+            bool got = false;
+            if (cap_.getBackendName() == "V4L2") {
+                std::vector<cv::VideoCapture> streams{cap_};
+                std::vector<int> ready;
+                if (!cv::VideoCapture::waitAny(streams, ready, 50'000'000)) continue;
+                got = cap_.retrieve(img);
+            } else {
+                got = cap_.read(img);
+            }
+            auto t = std::chrono::steady_clock::now();
 
-        if (!got || img.empty()) {
-            LOG_WARN(MODULE, "[USBCamera] read failed, reopening...");
+            if (!got || img.empty()) {
+                LOG_WARN(MODULE, "[USBCamera] read failed, reopening...");
+                cap_.release();
+                ok_ = false;
+                continue;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                latest_img_ = std::move(img);
+                latest_timestamp_ = t;
+                ++frame_sequence_;
+            }
+            frame_cv_.notify_one();
+
+            const auto frame_period = std::chrono::duration<double>(1.0 / fps_);
+            const auto next_frame = capture_started +
+                                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                        frame_period);
+            std::this_thread::sleep_until(next_frame);
+        } catch (const std::exception& error) {
+            LOG_ERROR(MODULE, "Camera capture failed: {}", error.what());
             cap_.release();
             ok_ = false;
-            continue;
         }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            latest_img_ = std::move(img);
-            latest_timestamp_ = t;
-            ++frame_sequence_;
-        }
-        frame_cv_.notify_one();
-
-        const auto frame_period = std::chrono::duration<double>(1.0 / fps_);
-        const auto next_frame = capture_started +
-                                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                    frame_period);
-        std::this_thread::sleep_until(next_frame);
     }
 }
 
 void USBCamera::read(cv::Mat& img, std::chrono::steady_clock::time_point& timestamp) {
     std::unique_lock<std::mutex> lock(mutex_);
-    frame_cv_.wait(lock, [this] {
+    frame_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
         return quit_ || frame_sequence_ != consumed_sequence_;
     });
-    if (quit_) {
+    if (quit_ || frame_sequence_ == consumed_sequence_) {
         img.release();
         return;
     }

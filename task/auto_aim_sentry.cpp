@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <csignal>
 #include <exception>
 #include <opencv2/opencv.hpp>
 #include <optional>
@@ -28,6 +29,16 @@ const std::string keys =
 
 using namespace std::chrono_literals;
 
+namespace {
+static_assert(std::atomic<bool>::is_always_lock_free);
+std::atomic<bool> interrupted{false};
+void stop_signal(int) { interrupted.store(true, std::memory_order_relaxed); }
+struct TargetSnapshot {
+    std::optional<app::auto_aim::Target> target;
+    uint64_t session = 0;
+};
+}
+
 int run(int argc, char* argv[]) {
     cv::CommandLineParser cli(argc, argv, keys);
     if (cli.has("help")) {
@@ -53,99 +64,121 @@ int run(int argc, char* argv[]) {
     app::auto_aim::Solver solver(config_path);
     app::auto_aim::Tracker tracker(config_path, solver);
     app::auto_aim::Planner planner(config_path);
+    const double max_target_age = config["planner"]["max_target_age"].value_or(0.1);
     const bool auto_fire = config["planner"]["auto_fire"].value_or(false);
 
-    tools::ThreadSafeQueue<std::optional<app::auto_aim::Target>, true> target_queue(1);
-    target_queue.push(std::nullopt);
-
+    tools::ThreadSafeQueue<TargetSnapshot, true> target_queue(1);
+    target_queue.push({});
     std::atomic<bool> quit{false};
-
-    // ===== 线程 1:采图 + 推 YOLO 队列 =====
-    auto capture_thread = std::thread([&]() {
-        while (!quit) {
-            if (gimbal.mode() != io::GimbalMode::AUTO_AIM) {
-                std::this_thread::sleep_for(50ms);
-                continue;
-            }
-
-            cv::Mat img;
-            std::chrono::steady_clock::time_point t;
-            camera.read(img, t);
-            if (img.empty()) {
-                std::this_thread::sleep_for(2ms);
-                continue;
-            }
-            mt_yolo.push(std::move(img), t);
+    std::atomic<bool> failed{false};
+    auto protect = [&](auto action) {
+        try {
+            action();
+        } catch (const std::exception& error) {
+            failed = true;
+            quit = true;
+            LOG_ERROR(MODULE, "Worker failed: {}", error.what());
+        } catch (...) {
+            failed = true;
+            quit = true;
+            LOG_ERROR(MODULE, "Worker failed with an unknown exception");
         }
+    };
+
+    std::jthread capture_thread([&](std::stop_token stop) {
+        protect([&] {
+            while (!quit && !stop.stop_requested()) {
+                if (gimbal.mode() != io::GimbalMode::AUTO_AIM) {
+                    std::this_thread::sleep_for(10ms);
+                    continue;
+                }
+                cv::Mat img;
+                std::chrono::steady_clock::time_point t;
+                camera.read(img, t);
+                if (!img.empty()) mt_yolo.push(std::move(img), t);
+            }
+        });
     });
 
-    // ===== 线程 2:取 YOLO 结果 → Solver/Tracker → 推 target_queue =====
-    auto track_thread = std::thread([&]() {
-        while (!quit) {
-            if (mt_yolo.empty()) {
-                std::this_thread::sleep_for(1ms);
-                continue;
+    std::jthread track_thread([&](std::stop_token stop) {
+        protect([&] {
+            uint64_t tracker_session = 0;
+            while (!quit && !stop.stop_requested()) {
+                if (mt_yolo.empty()) {
+                    std::this_thread::sleep_for(1ms);
+                    continue;
+                }
+                auto [armors, t] = mt_yolo.pop();
+                const auto session = gimbal.session();
+                if (session != tracker_session) {
+                    tracker.reset();
+                    tracker_session = session;
+                }
+                if (gimbal.mode() != io::GimbalMode::AUTO_AIM ||
+                    t < gimbal.session_started()) {
+                    target_queue.push({});
+                    continue;
+                }
+                try {
+                    solver.set_R_gimbal2world(gimbal.q(t));
+                } catch (const std::runtime_error&) {
+                    tracker.reset();
+                    target_queue.push({});
+                    continue;
+                }
+                auto targets = tracker.track(armors, t);
+                target_queue.push({targets.empty() ? std::nullopt
+                                                  : std::optional{targets.front()}, session});
             }
-            auto [armors, t] = mt_yolo.pop();
-            if (quit) break;
-
-            auto q = gimbal.q(t);
-            solver.set_R_gimbal2world(q);
-
-            auto targets = tracker.track(armors, t);
-            if (targets.empty()) {
-                target_queue.push(std::nullopt);
-            } else {
-                target_queue.push(targets.front());
-            }
-        }
+        });
     });
 
-    // ===== 线程 3:Planner/TinyMPC → Gimbal =====
-    auto plan_thread = std::thread([&]() {
-        while (!quit) {
-            if (gimbal.mode() != io::GimbalMode::AUTO_AIM) {
-                gimbal.send(false, false, 0, 0, 0, 0, 0, 0);
-                std::this_thread::sleep_for(50ms);
-                continue;
+    std::jthread plan_thread([&](std::stop_token stop) {
+        protect([&] {
+            while (!quit && !stop.stop_requested()) {
+                const auto snapshot = target_queue.front();
+                const auto gs = gimbal.state();
+                app::auto_aim::Plan plan{};
+                if (gimbal.mode() == io::GimbalMode::AUTO_AIM &&
+                    snapshot.session == gimbal.session()) {
+                    plan = planner.plan(snapshot.target, gs.bullet_speed);
+                }
+                if (snapshot.target &&
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                  snapshot.target->timestamp()).count() > max_target_age) {
+                    plan = {};
+                }
+                if (quit || interrupted || stop.stop_requested()) break;
+                gimbal.send(plan.control, auto_fire && plan.fire,
+                            plan.yaw, plan.yaw_vel, plan.yaw_acc,
+                            plan.pitch, plan.pitch_vel, plan.pitch_acc, snapshot.session);
+                std::this_thread::sleep_for(10ms);
             }
-            if (target_queue.empty()) {
-                std::this_thread::sleep_for(2ms);
-                continue;
-            }
-
-            auto gs = gimbal.state();
-            auto plan = planner.plan(target_queue.front(), gs.bullet_speed);
-
-            gimbal.send(
-                plan.control, auto_fire && plan.fire, plan.yaw, plan.yaw_vel, plan.yaw_acc,
-                plan.pitch, plan.pitch_vel, plan.pitch_acc);
-
-            std::this_thread::sleep_for(10ms);
-        }
+        });
     });
 
-    // ===== 主线程:监听模式切换 =====
     auto last_mode = io::GimbalMode::IDLE;
-    while (!quit) {
-        auto mode = gimbal.mode();
+    while (!quit && !interrupted) {
+        const auto mode = gimbal.mode();
         if (mode != last_mode) {
             LOG_INFO(MODULE, "Switch to {}", gimbal.str(mode));
             last_mode = mode;
         }
-        std::this_thread::sleep_for(50ms);
+        std::this_thread::sleep_for(10ms);
     }
 
     quit = true;
-    if (capture_thread.joinable()) capture_thread.join();
-    if (track_thread.joinable()) track_thread.join();
-    if (plan_thread.joinable()) plan_thread.join();
+    camera.stop();
+    plan_thread.join();
     gimbal.send(false, false, 0, 0, 0, 0, 0, 0);
-
-    return 0;
+    capture_thread.join();
+    track_thread.join();
+    return failed ? 1 : 0;
 }
 
 int main(int argc, char* argv[]) {
+    std::signal(SIGINT, stop_signal);
+    std::signal(SIGTERM, stop_signal);
     try {
         return run(argc, argv);
     } catch (const std::exception& e) {

@@ -24,11 +24,43 @@ Planner::Planner(const std::string& config_path) {
     high_speed_delay_time_ = config["planner"]["high_speed_delay_time"].value_or(0.12);
     low_speed_delay_time_ = config["planner"]["low_speed_delay_time"].value_or(0.12);
 
-    setup_yaw_solver(config_path);
-    setup_pitch_solver(config_path);
+    max_target_age_ = config["planner"]["max_target_age"].value_or(0.1);
+    if (!std::isfinite(max_target_age_) || max_target_age_ <= 0) {
+        throw std::runtime_error("planner.max_target_age must be finite and positive");
+    }
+    for (const double value : {yaw_offset_, pitch_offset_, fire_thresh_, decision_speed_,
+                               high_speed_delay_time_, low_speed_delay_time_}) {
+        if (!std::isfinite(value)) throw std::runtime_error("planner parameters must be finite");
+    }
+    if (high_speed_delay_time_ < 0 || low_speed_delay_time_ < 0 || fire_thresh_ < 0) {
+        throw std::runtime_error("planner delays and fire threshold must be nonnegative");
+    }
+    try {
+        setup_yaw_solver(config_path);
+        setup_pitch_solver(config_path);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+}
+
+Planner::~Planner() { cleanup(); }
+
+void Planner::cleanup() {
+    for (auto solver : {yaw_solver_, pitch_solver_}) {
+        if (!solver) continue;
+        delete solver->solution;
+        delete solver->cache;
+        delete solver->settings;
+        delete solver->work;
+        delete solver;
+    }
+    yaw_solver_ = pitch_solver_ = nullptr;
 }
 
 Plan Planner::plan(Target target, double bullet_speed) {
+    const auto state = target.ekf_x();
+    if (state.size() != 11 || !state.allFinite() || !std::isfinite(bullet_speed)) return {false};
     if (bullet_speed < 10 || bullet_speed > 25) {
         bullet_speed = 22;
     }
@@ -62,18 +94,35 @@ Plan Planner::plan(Target target, double bullet_speed) {
         return {false};
     }
 
+    if (!traj.allFinite() || !std::isfinite(yaw0)) return {false};
+
     Eigen::VectorXd x0(2);
     x0 << traj(0, 0), traj(1, 0);
     tiny_set_x0(yaw_solver_, x0);
 
     yaw_solver_->work->Xref = traj.block(0, 0, 2, HORIZON);
-    tiny_solve(yaw_solver_);
+    const int yaw_status = tiny_solve(yaw_solver_);
 
     x0 << traj(2, 0), traj(3, 0);
     tiny_set_x0(pitch_solver_, x0);
 
     pitch_solver_->work->Xref = traj.block(2, 0, 2, HORIZON);
-    tiny_solve(pitch_solver_);
+    const int pitch_status = tiny_solve(pitch_solver_);
+    if (!yaw_solver_->solution->u.allFinite() || !pitch_solver_->solution->u.allFinite()) return {false};
+
+    // ADMM's work->u is unconstrained until convergence. Roll out the projected
+    // inputs so both the transmitted acceleration and angles respect the bounds.
+    auto rollout = [](TinySolver* solver) -> Eigen::MatrixXd {
+        Eigen::MatrixXd x = solver->work->x;
+        for (int i = 1; i < HORIZON; ++i) {
+            x.col(i) = solver->work->Adyn * x.col(i - 1) +
+                       solver->work->Bdyn * solver->solution->u.col(i - 1);
+        }
+        return x;
+    };
+    const auto yaw_x = rollout(yaw_solver_);
+    const auto pitch_x = rollout(pitch_solver_);
+    if (!yaw_x.allFinite() || !pitch_x.allFinite()) return {false};
 
     Plan plan;
     plan.control = true;
@@ -81,32 +130,36 @@ Plan Planner::plan(Target target, double bullet_speed) {
     plan.target_yaw = tools::limit_rad(traj(0, HALF_HORIZON) + yaw0);
     plan.target_pitch = traj(2, HALF_HORIZON);
 
-    plan.yaw = tools::limit_rad(yaw_solver_->work->x(0, HALF_HORIZON) + yaw0);
-    plan.yaw_vel = yaw_solver_->work->x(1, HALF_HORIZON);
-    plan.yaw_acc = yaw_solver_->work->u(0, HALF_HORIZON);
+    plan.yaw = tools::limit_rad(yaw_x(0, HALF_HORIZON) + yaw0);
+    plan.yaw_vel = yaw_x(1, HALF_HORIZON);
+    plan.yaw_acc = yaw_solver_->solution->u(0, HALF_HORIZON);
 
-    plan.pitch = pitch_solver_->work->x(0, HALF_HORIZON);
-    plan.pitch_vel = pitch_solver_->work->x(1, HALF_HORIZON);
-    plan.pitch_acc = pitch_solver_->work->u(0, HALF_HORIZON);
+    plan.pitch = pitch_x(0, HALF_HORIZON);
+    plan.pitch_vel = pitch_x(1, HALF_HORIZON);
+    plan.pitch_acc = pitch_solver_->solution->u(0, HALF_HORIZON);
 
     auto shoot_offset_ = 2;
-    plan.fire = std::hypot(
+    plan.fire = target.observed && yaw_status == 0 && pitch_status == 0 && std::hypot(
                     traj(0, HALF_HORIZON + shoot_offset_)
-                        - yaw_solver_->work->x(0, HALF_HORIZON + shoot_offset_),
+                        - yaw_x(0, HALF_HORIZON + shoot_offset_),
                     traj(2, HALF_HORIZON + shoot_offset_)
-                        - pitch_solver_->work->x(0, HALF_HORIZON + shoot_offset_))
+                        - pitch_x(0, HALF_HORIZON + shoot_offset_))
                 < fire_thresh_;
     return plan;
 }
 
-Plan Planner::plan(std::optional<Target> target, double bullet_speed) {
+Plan Planner::plan(std::optional<Target> target, double bullet_speed,
+                   std::chrono::steady_clock::time_point now) {
     if (!target.has_value()) return {false};
+    const double age = std::chrono::duration<double>(now - target->timestamp()).count();
+    const auto state = target->ekf_x();
+    if (age < 0 || age > max_target_age_ || state.size() != 11 || !state.allFinite()) return {false};
 
     double delay_time = std::abs(target->ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_
                                                                        : low_speed_delay_time_;
 
     auto future =
-        std::chrono::steady_clock::now() + std::chrono::microseconds(int(delay_time * 1e6));
+        now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(delay_time));
 
     target->predict(future);
 
@@ -128,6 +181,12 @@ void Planner::setup_yaw_solver(const std::string& config_path) {
     }
     if (Q_yaw.size() != 2 || R_yaw.size() != 1) {
         throw std::runtime_error("planner.Q_yaw must contain 2 values and R_yaw 1 value");
+    }
+
+    if (!std::isfinite(max_yaw_acc) || max_yaw_acc <= 0 ||
+        !std::isfinite(Q_yaw[0]) || !std::isfinite(Q_yaw[1]) ||
+        !std::isfinite(R_yaw[0]) || Q_yaw[0] < 0 || Q_yaw[1] < 0 || R_yaw[0] <= 0) {
+        throw std::runtime_error("invalid yaw MPC costs or acceleration bound");
     }
 
     Eigen::MatrixXd A{{1, DT}, {0, 1}};
@@ -165,6 +224,12 @@ void Planner::setup_pitch_solver(const std::string& config_path) {
     }
     if (Q_pitch.size() != 2 || R_pitch.size() != 1) {
         throw std::runtime_error("planner.Q_pitch must contain 2 values and R_pitch 1 value");
+    }
+
+    if (!std::isfinite(max_pitch_acc) || max_pitch_acc <= 0 ||
+        !std::isfinite(Q_pitch[0]) || !std::isfinite(Q_pitch[1]) ||
+        !std::isfinite(R_pitch[0]) || Q_pitch[0] < 0 || Q_pitch[1] < 0 || R_pitch[0] <= 0) {
+        throw std::runtime_error("invalid pitch MPC costs or acceleration bound");
     }
 
     Eigen::MatrixXd A{{1, DT}, {0, 1}};

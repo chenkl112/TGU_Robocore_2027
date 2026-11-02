@@ -1,6 +1,7 @@
 #include "solver.hpp"
 
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 #include "tools/logger.hpp"
@@ -32,39 +33,59 @@ Solver::Solver(const std::string& config_path)
 
     auto read_matrix_3x3 = [&](const char* key) -> Eigen::Matrix3d {
         auto data = config["camera"][key].as_array();
-        if (!data || data->size() < 9) {
-            LOG_WARN(MODULE, "Missing or invalid config key: {}", key);
-            return Eigen::Matrix3d::Identity();
+        if (!data || data->size() != 9) {
+            throw std::invalid_argument(std::string("camera.") + key + " must contain 9 values");
         }
         Eigen::Matrix3d m;
-        for (int i = 0; i < 9; ++i)
-            m(i / 3, i % 3) = (*data)[i].value_or(0.0);
+        for (int i = 0; i < 9; ++i) {
+            auto value = (*data)[i].value<double>();
+            if (!value) throw std::invalid_argument(std::string("invalid camera.") + key);
+            m(i / 3, i % 3) = *value;
+        }
+        if (!m.allFinite()) throw std::invalid_argument(std::string("nonfinite camera.") + key);
         return m;
     };
 
     auto read_vector_3 = [&](const char* key) -> Eigen::Vector3d {
         auto data = config["camera"][key].as_array();
-        if (!data || data->size() < 3) {
-            LOG_WARN(MODULE, "Missing or invalid config key: {}", key);
-            return Eigen::Vector3d::Zero();
+        if (!data || data->size() != 3) {
+            throw std::invalid_argument(std::string("camera.") + key + " must contain 3 values");
         }
-        return Eigen::Vector3d(
-            (*data)[0].value_or(0.0), (*data)[1].value_or(0.0), (*data)[2].value_or(0.0));
+        Eigen::Vector3d result;
+        for (int i = 0; i < 3; ++i) {
+            auto value = (*data)[i].value<double>();
+            if (!value || !std::isfinite(*value)) throw std::invalid_argument(std::string("invalid camera.") + key);
+            result[i] = *value;
+        }
+        return result;
     };
 
     R_gimbal2imubody_ = read_matrix_3x3("R_gimbal2imubody");
     R_camera2gimbal_ = read_matrix_3x3("R_camera2gimbal");
     t_camera2gimbal_ = read_vector_3("t_camera2gimbal");
+    for (const auto& rotation : {R_gimbal2imubody_, R_camera2gimbal_}) {
+        if ((rotation.transpose() * rotation - Eigen::Matrix3d::Identity()).norm() > 1e-3 ||
+            std::abs(rotation.determinant() - 1) > 1e-3) {
+            throw std::invalid_argument("camera extrinsic rotation must be orthonormal with determinant +1");
+        }
+    }
 
     Eigen::Matrix3d camera_matrix = read_matrix_3x3("camera_matrix");
+    if (camera_matrix(0, 0) <= 0 || camera_matrix(1, 1) <= 0 ||
+        (camera_matrix.row(2) - Eigen::RowVector3d(0, 0, 1)).norm() > 1e-9) {
+        throw std::invalid_argument("invalid camera intrinsics");
+    }
     cv::eigen2cv(camera_matrix, camera_matrix_);
 
     auto distort_data = config["camera"]["distort_coeffs"].as_array();
     Eigen::Matrix<double, 1, 5> distort_coeffs;
-    if (distort_data && distort_data->size() >= 5) {
-        for (int i = 0; i < 5; ++i) distort_coeffs[i] = (*distort_data)[i].value_or(0.0);
-    } else {
-        distort_coeffs.setZero();
+    if (!distort_data || distort_data->size() != 5) {
+        throw std::invalid_argument("camera.distort_coeffs must contain 5 values");
+    }
+    for (int i = 0; i < 5; ++i) {
+        auto value = (*distort_data)[i].value<double>();
+        if (!value || !std::isfinite(*value)) throw std::invalid_argument("invalid camera.distort_coeffs");
+        distort_coeffs[i] = *value;
     }
     cv::eigen2cv(distort_coeffs, distort_coeffs_);
 }
@@ -72,7 +93,10 @@ Solver::Solver(const std::string& config_path)
 Eigen::Matrix3d Solver::R_gimbal2world() const { return R_gimbal2world_; }
 
 void Solver::set_R_gimbal2world(const Eigen::Quaterniond& q) {
-    Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
+    if (!q.coeffs().allFinite() || !std::isfinite(q.norm()) || q.norm() < 1e-6) {
+        throw std::invalid_argument("invalid gimbal quaternion");
+    }
+    Eigen::Matrix3d R_imubody2imuabs = q.normalized().toRotationMatrix();
     R_gimbal2world_ =
         R_gimbal2imubody_.transpose() * R_imubody2imuabs * R_gimbal2imubody_;
 }
@@ -86,11 +110,20 @@ bool Solver::solve(Armor& armor) const {
     const auto& object_points =
         (armor.type == ArmorType::big) ? BIG_ARMOR_POINTS : SMALL_ARMOR_POINTS;
 
+    for (const auto& point : armor.points) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) return false;
+    }
+    if (std::abs(cv::contourArea(armor.points)) < 1.0) return false;
     cv::Vec3d rvec, tvec;
-    const bool solved = cv::solvePnP(
+    bool solved = false;
+    try {
+        solved = cv::solvePnP(
         object_points, armor.points, camera_matrix_, distort_coeffs_, rvec, tvec, false,
         cv::SOLVEPNP_IPPE);
-    if (!solved || tvec[2] <= 0) {
+    } catch (const cv::Exception&) {
+        return false;
+    }
+    if (!solved || !cv::checkRange(rvec) || !cv::checkRange(tvec) || tvec[2] <= 0) {
         LOG_WARN(MODULE, "PnP failed or returned non-positive depth");
         return false;
     }
@@ -114,10 +147,10 @@ bool Solver::solve(Armor& armor) const {
     auto is_balance = (armor.type == ArmorType::big) &&
                       (armor.name == ArmorName::three || armor.name == ArmorName::four ||
                        armor.name == ArmorName::five);
-    if (is_balance) return true;
+    if (is_balance) return armor.xyz_in_world.allFinite() && armor.ypr_in_world.allFinite();
 
     optimize_yaw(armor);
-    return true;
+    return armor.xyz_in_world.allFinite() && armor.ypr_in_world.allFinite() && armor.ypd_in_world.allFinite();
 }
 
 std::vector<cv::Point2f> Solver::reproject_armor(

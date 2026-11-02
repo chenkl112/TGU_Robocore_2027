@@ -4,7 +4,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-当前分支为 `auto-aim-v0.1`，支持英雄、工程、步兵和哨兵，不处理前哨站、基地和能量机关。
+自瞄代码基于 `auto-aim-v0.1`，支持英雄、工程、步兵和哨兵，不处理前哨站、基地和能量机关。
 
 ```text
 USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
@@ -15,7 +15,7 @@ USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
 
 以下命令在本分支的仓库根目录执行。需要 Ubuntu 24.04 或能提供 GCC 13+ 的 Linux 环境，编译器须支持 C++20 的 `std::format`。
 
-1. 安装系统依赖，包括 CMake 3.16+、OpenCV、Eigen3、Boost.System 和 Aravis 0.8：
+1. 安装系统依赖，包括 CMake 3.20+、OpenCV、Eigen3、Boost.System 和 Aravis 0.8：
 
    ```bash
    sudo apt update
@@ -37,7 +37,8 @@ USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
 
    ```bash
    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-   cmake --build build -j
+   cmake --build build -j4
+   ctest --test-dir build --output-on-failure -j4
    ./build/planner_test --config-path=config/auto_aim.toml
    ```
 
@@ -104,3 +105,5 @@ sudo udevadm trigger
 自瞄实现改编自 TongjiSuperPower 的 `sp_vision_25`，原 MIT 许可证保留在 [LICENSES/sp_vision_25-MIT.txt](LICENSES/sp_vision_25-MIT.txt)。模型另有许可信息，见 [第三方说明](LICENSES/README.md)；该 MIT 许可证不代表仓库所有内容均采用 MIT。
 
 模块划分、坐标和单位约定见 [自瞄模块说明](app/auto_aim/README.md)。实机验证缺口和后续计划见 [v0.1 评审](docs/auto_aim_v0.1_review.md)。
+
+2026-11-02 的全量代码审查、P1 修复及验证结果见 [审查报告](docs/review_2026-11-02.md)。

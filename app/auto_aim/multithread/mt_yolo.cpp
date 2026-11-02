@@ -19,24 +19,43 @@ MultiThreadYOLO::~MultiThreadYOLO() {
 }
 
 void MultiThreadYOLO::push(cv::Mat img, std::chrono::steady_clock::time_point t) {
+    check_error();
     in_queue_.push({std::move(img), t});
 }
 
 MultiThreadYOLO::FrameOut MultiThreadYOLO::pop() {
-    return out_queue_.pop();
+    check_error();
+    auto result = out_queue_.pop();
+    check_error();
+    return result;
 }
 
 bool MultiThreadYOLO::empty() {
+    check_error();
     return out_queue_.empty();
 }
 
-void MultiThreadYOLO::worker() {
-    while (!quit_) {
-        auto [img, t] = in_queue_.pop();
-        if (quit_ || img.empty()) continue;
+void MultiThreadYOLO::check_error() {
+    std::lock_guard lock(error_mutex_);
+    if (error_) std::rethrow_exception(error_);
+}
 
-        auto armors = yolo_.detect(img);
-        out_queue_.push({std::move(armors), t});
+void MultiThreadYOLO::worker() {
+    try {
+        while (!quit_) {
+            auto [img, t] = in_queue_.pop();
+            if (quit_ || img.empty()) continue;
+
+            auto armors = yolo_.detect(img);
+            out_queue_.push({std::move(armors), t});
+        }
+    } catch (...) {
+        {
+            std::lock_guard lock(error_mutex_);
+            error_ = std::current_exception();
+        }
+        // Wake a consumer already blocked in pop(), which rethrows the error.
+        out_queue_.push(FrameOut{std::list<Armor>{}, std::chrono::steady_clock::now()});
     }
     LOG_INFO(MODULE, "[MultiThreadYOLO] stopped.");
 }

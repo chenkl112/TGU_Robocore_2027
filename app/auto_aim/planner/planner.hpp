@@ -35,11 +35,16 @@ class Planner {
 public:
     Eigen::Vector4d debug_xyza;
     explicit Planner(const std::string& config_path);
+    ~Planner();
+    Planner(const Planner&) = delete;
+    Planner& operator=(const Planner&) = delete;
 
     Plan plan(Target target, double bullet_speed);
-    Plan plan(std::optional<Target> target, double bullet_speed);
+    Plan plan(std::optional<Target> target, double bullet_speed,
+              std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
 private:
+    double max_target_age_;
     double yaw_offset_;
     double pitch_offset_;
     double fire_thresh_;
@@ -48,6 +53,7 @@ private:
     TinySolver* yaw_solver_ = nullptr;
     TinySolver* pitch_solver_ = nullptr;
 
+    void cleanup();
     void setup_yaw_solver(const std::string& config_path);
     void setup_pitch_solver(const std::string& config_path);
 

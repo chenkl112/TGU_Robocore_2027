@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <format>
 #include <opencv2/opencv.hpp>
@@ -26,7 +27,7 @@ const std::string keys =
 
 using namespace std::chrono_literals;
 
-int main(int argc, char* argv[]) {
+int run(int argc, char* argv[]) {
     cv::CommandLineParser cli(argc, argv, keys);
     if (cli.has("help")) {
         cli.printMessage();
@@ -36,6 +37,10 @@ int main(int argc, char* argv[]) {
     auto config_path = cli.get<std::string>("config-path");
     auto start_index = cli.get<int>("start-index");
     auto end_index = cli.get<int>("end-index");
+    if (!cli.check() || start_index < 0 || (end_index > 0 && end_index < start_index)) {
+        LOG_ERROR(MODULE, "Invalid replay frame range");
+        return 1;
+    }
 
     auto video_path = std::format("{}.avi", input_path);
     auto text_path = std::format("{}.txt", input_path);
@@ -61,32 +66,52 @@ int main(int argc, char* argv[]) {
 
     std::atomic<bool> quit{false};
 
-    auto plan_thread = std::thread([&]() {
-        constexpr double bullet_speed = 23.0;
-        while (!quit) {
-            if (target_queue.empty()) {
-                std::this_thread::sleep_for(2ms);
-                continue;
-            }
-            auto plan = planner.plan(target_queue.front(), bullet_speed);
+    std::atomic<bool> failed{false};
+    auto plan_thread = std::jthread([&](std::stop_token stop) {
+        try {
+            constexpr double bullet_speed = 23.0;
+            while (!quit && !stop.stop_requested()) {
+                if (target_queue.empty()) {
+                    std::this_thread::sleep_for(2ms);
+                    continue;
+                }
+                const auto target = target_queue.front();
+                auto plan = planner.plan(target, bullet_speed,
+                                         target ? target->timestamp() : std::chrono::steady_clock::now());
 
-            if (plan.control) {
-                LOG_INFO(
-                    MODULE,
-                    "[MPC] yaw={:.3f} yaw_vel={:.3f} yaw_acc={:.3f} "
-                    "pitch={:.3f} pitch_vel={:.3f} pitch_acc={:.3f} fire={}",
-                    plan.yaw * 57.3, plan.yaw_vel, plan.yaw_acc, plan.pitch * 57.3,
-                    plan.pitch_vel, plan.pitch_acc, plan.fire);
+                if (plan.control) {
+                    LOG_INFO(
+                        MODULE,
+                        "[MPC] yaw={:.3f} yaw_vel={:.3f} yaw_acc={:.3f} "
+                        "pitch={:.3f} pitch_vel={:.3f} pitch_acc={:.3f} fire={}",
+                        plan.yaw * 57.3, plan.yaw_vel, plan.yaw_acc, plan.pitch * 57.3,
+                        plan.pitch_vel, plan.pitch_acc, plan.fire);
+                }
+                std::this_thread::sleep_for(10ms);
             }
-            std::this_thread::sleep_for(10ms);
+        } catch (const std::exception& error) {
+            failed = true;
+            quit = true;
+            LOG_ERROR(MODULE, "Replay planner failed: {}", error.what());
         }
     });
 
     cv::Mat img;
     auto t0 = std::chrono::steady_clock::now();
-    video.set(cv::CAP_PROP_POS_FRAMES, start_index);
+    if (start_index > 0 && !video.set(cv::CAP_PROP_POS_FRAMES, start_index)) {
+        LOG_ERROR(MODULE, "Cannot seek to frame {}", start_index);
+        return 1;
+    }
+    // Pose records must be advanced together with the video seek.
+    for (int i = 0; i < start_index; ++i) {
+        double t, w, x, y, z;
+        if (!(text >> t >> w >> x >> y >> z)) {
+            LOG_ERROR(MODULE, "Pose stream ended before start-index");
+            return 1;
+        }
+    }
 
-    for (int frame_count = start_index;; frame_count++) {
+    for (int frame_count = start_index; !quit; frame_count++) {
         if (end_index > 0 && frame_count > end_index) break;
 
         video.read(img);
@@ -95,9 +120,16 @@ int main(int argc, char* argv[]) {
         double t, w, x, y, z;
         if (!(text >> t >> w >> x >> y >> z)) {
             LOG_ERROR(MODULE, "Pose stream ended or contains invalid data at frame {}", frame_count);
+            failed = true;
             break;
         }
-        auto timestamp = t0 + std::chrono::microseconds(int(t * 1e6));
+        if (!std::isfinite(t) || t < 0 || t > 1e9) {
+            LOG_ERROR(MODULE, "Invalid recording timestamp");
+            failed = true;
+            break;
+        }
+        auto timestamp = t0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                  std::chrono::duration<double>(t));
 
         solver.set_R_gimbal2world({w, x, y, z});
 
@@ -122,5 +154,14 @@ int main(int argc, char* argv[]) {
     quit = true;
     if (plan_thread.joinable()) plan_thread.join();
 
-    return 0;
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char* argv[]) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& error) {
+        LOG_ERROR(MODULE, "Replay failed: {}", error.what());
+        return 1;
+    }
 }

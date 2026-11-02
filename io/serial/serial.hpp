@@ -6,8 +6,14 @@
 #define TGU_ROBOCORE_2027_SERIAL_HPP
 
 #pragma once
+#include <utility>
 #include <boost/asio.hpp>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <type_traits>
 #include <vector>
 #include <cstring>
 
@@ -47,6 +53,9 @@ private:
 template<typename T, size_t N = 2048>
 class StructParser {
 public:
+    static_assert(std::is_trivially_copyable_v<T>, "Serial packets must be trivially copyable");
+    static_assert(sizeof(T) >= 2 && sizeof(T) <= N, "Packet must fit the parser buffer");
+
     StructParser() {
         T dummy{};
 
@@ -114,16 +123,29 @@ public:
 
     template<typename T>
     void recv(std::function<void(const T&)> cb) {
-
-        auto wrapper = [this, cb](const uint8_t* data, size_t len) {
+        struct Receiver {
+            StructParser<T> parser;
+            uint64_t session = 0;
+            std::function<void(const T&)> callback;
+        };
+        auto receiver = std::make_shared<Receiver>();
+        receiver->callback = std::move(cb);
+        auto wrapper = [this, receiver](
+                           const uint8_t* data, size_t len, uint64_t session) {
+            if (receiver->session != session) {
+                receiver->parser = StructParser<T>{};
+                receiver->session = session;
+            }
             for (size_t i = 0; i < len; i++) {
+                if (!is_current_session(session)) return;
                 T pkt;
-                if (parser_<T>.input(data[i], pkt)) {
-                    cb(pkt);
+                if (receiver->parser.input(data[i], pkt)) {
+                    receiver->callback(pkt);
                 }
             }
         };
 
+        std::lock_guard<std::mutex> lock(callbacks_mutex_);
         callbacks_.push_back(wrapper);
     }
 
@@ -132,19 +154,21 @@ public:
 private:
     boost::asio::io_context io_;
     boost::asio::serial_port serial_;
-    bool is_open_;
+    mutable std::mutex state_mutex_;
+    std::condition_variable state_changed_;
+    bool is_open_ = false;
+    uint64_t session_ = 0;
+    std::mutex read_mutex_;
+    std::mutex write_mutex_;
+    std::mutex callbacks_mutex_;
+    std::vector<std::function<void(const uint8_t*, size_t, uint64_t)>> callbacks_;
 
-    uint8_t rx_buf_[512];
-
-    std::vector<std::function<void(const uint8_t*, size_t)>> callbacks_;
-
-    template<typename T>
-    static StructParser<T> parser_;
+    void close_locked();
+    void close_session(uint64_t session);
+    bool is_current_session(uint64_t session) const;
+    bool wait_ready(int fd, uint64_t session, short events, int timeout_ms);
     static constexpr const char* MODULE = "SERIAL";
 };
-
-template<typename T>
-StructParser<T> Serial::parser_;
 
 } // namespace io
 
