@@ -63,3 +63,9 @@ bundled weights and generated armor images.
 Projection regressions cover small and big armor at 3 m, roll angles 0/±20/±45/±70
 degrees, and view angles 0/35/70/80 degrees. OpenCV IPPE results that are nonfinite
 or behind the camera are retried with the iterative PnP solver using the same points.
+
+The retained `Shooter` path requires both yaw and pitch command stability and actual
+gimbal alignment before returning `true`. The live MPC entry point does not call this
+legacy path; its Planner and Gimbal checks independently require current yaw/pitch
+feedback before allowing fire. A disconnected Gimbal enters IDLE and retries the
+configured serial port at `gimbal.reconnect_delay_ms` until valid feedback returns.

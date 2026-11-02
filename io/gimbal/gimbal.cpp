@@ -14,20 +14,25 @@ static constexpr const char* MODULE = "GIMBAL";
 
 Gimbal::Gimbal(const std::string& config_path) {
     auto config = toml::parse_file(config_path);
-    auto com_port = std::string{config["gimbal"]["com_port"].value_or("/dev/ttyUSB0")};
-    auto baudrate = config["gimbal"]["baudrate"].value_or(115200);
+    com_port_ = std::string{config["gimbal"]["com_port"].value_or("/dev/ttyUSB0")};
+    baudrate_ = config["gimbal"]["baudrate"].value_or(115200);
 
     const int timeout_ms = config["gimbal"]["feedback_timeout_ms"].value_or(100);
     if (timeout_ms <= 0) throw std::runtime_error("gimbal.feedback_timeout_ms must be positive");
     feedback_timeout_ = std::chrono::milliseconds(timeout_ms);
+    const int reconnect_delay_ms = config["gimbal"]["reconnect_delay_ms"].value_or(250);
+    if (reconnect_delay_ms <= 0) {
+        throw std::runtime_error("gimbal.reconnect_delay_ms must be positive");
+    }
+    reconnect_delay_ = std::chrono::milliseconds(reconnect_delay_ms);
     fire_thresh_ = config["planner"]["fire_thresh"].value_or(0.05);
     if (!std::isfinite(fire_thresh_) || fire_thresh_ < 0) {
         throw std::runtime_error("planner.fire_thresh must be finite and nonnegative");
     }
 
-    if (!serial_.open(com_port, baudrate)) {
-        LOG_ERROR(MODULE, "[Gimbal] Failed to open serial: {}", com_port);
-        throw std::runtime_error("failed to open gimbal serial: " + com_port);
+    if (!serial_.open(com_port_, baudrate_)) {
+        LOG_ERROR(MODULE, "[Gimbal] Failed to open serial: {}", com_port_);
+        throw std::runtime_error("failed to open gimbal serial: " + com_port_);
     }
 
     thread_ = std::thread(&Gimbal::read_thread, this);
@@ -189,8 +194,27 @@ void Gimbal::read_thread() {
         return tools::check_crc16(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt));
     });
 
-    while (!quit_ && serial_.is_open()) {
+    auto next_reconnect = std::chrono::steady_clock::now();
+    while (!quit_) {
+        if (!serial_.is_open()) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                mode_ = GimbalMode::IDLE;
+            }
+            std::this_thread::sleep_until(next_reconnect);
+            if (quit_) break;
+            if (serial_.open(com_port_, baudrate_)) {
+                LOG_INFO(MODULE, "[Gimbal] Reconnected serial: {}", com_port_);
+            } else {
+                LOG_WARN(MODULE, "[Gimbal] Serial reconnect failed: {}", com_port_);
+            }
+            next_reconnect = std::chrono::steady_clock::now() + reconnect_delay_;
+            continue;
+        }
         serial_.spin_once();
+        if (!serial_.is_open()) {
+            next_reconnect = std::chrono::steady_clock::now() + reconnect_delay_;
+        }
     }
 
     pose_cv_.notify_all();

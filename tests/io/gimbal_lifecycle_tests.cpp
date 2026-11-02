@@ -136,6 +136,69 @@ public:
     }
 };
 
+void reconnect() {
+    Pty first;
+    const auto link = std::filesystem::temp_directory_path() /
+                      ("robocore-gimbal-link-" + std::to_string(::getpid()));
+    std::error_code ignored;
+    std::filesystem::remove(link, ignored);
+    require(::symlink(first.name().c_str(), link.c_str()) == 0, "Cannot create reconnect symlink");
+    Config config(link.string());
+    std::atomic<bool> first_running{true};
+    std::jthread first_sender([&](std::stop_token stop) {
+        while (!stop.stop_requested() && first_running) {
+            io::GimbalToVision packet{};
+            packet.mode = 1;
+            packet.q[0] = 1;
+            packet.bullet_speed = 22;
+            packet.crc16 = tools::get_crc16(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - 2);
+            const auto count = ::write(first.master(), &packet, sizeof(packet));
+            if (count < 0 && errno != EAGAIN && errno != EINTR) break;
+            std::this_thread::sleep_for(5ms);
+        }
+    });
+    auto device = std::make_unique<io::Gimbal>(config.path());
+    std::this_thread::sleep_for(40ms);
+    const auto old_session = device->session();
+    first_running = false;
+    first_sender.request_stop();
+    first_sender.join();
+    first.disconnect();
+    const auto idle_deadline = Clock::now() + 500ms;
+    while (Clock::now() < idle_deadline && device->mode() != io::GimbalMode::IDLE) {
+        std::this_thread::sleep_for(10ms);
+    }
+    require(device->mode() == io::GimbalMode::IDLE, "Disconnected gimbal stayed active");
+
+    Pty second;
+    std::filesystem::remove(link, ignored);
+    require(::symlink(second.name().c_str(), link.c_str()) == 0, "Cannot replace reconnect symlink");
+    std::atomic<bool> second_running{true};
+    std::jthread second_sender([&](std::stop_token stop) {
+        while (!stop.stop_requested() && second_running) {
+            io::GimbalToVision packet{};
+            packet.mode = 1;
+            packet.q[0] = 1;
+            packet.bullet_speed = 22;
+            packet.crc16 = tools::get_crc16(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - 2);
+            const auto count = ::write(second.master(), &packet, sizeof(packet));
+            if (count < 0 && errno != EAGAIN && errno != EINTR) break;
+            std::this_thread::sleep_for(5ms);
+        }
+    });
+    const auto deadline = Clock::now() + 2s;
+    while (Clock::now() < deadline && device->mode() != io::GimbalMode::AUTO_AIM) {
+        std::this_thread::sleep_for(10ms);
+    }
+    require(device->mode() == io::GimbalMode::AUTO_AIM, "Gimbal did not reconnect to the replacement port");
+    require(device->session() != old_session, "Reconnect reused the old tracking session");
+    second_running = false;
+    second_sender.request_stop();
+    second_sender.join();
+    device.reset();
+    std::filesystem::remove(link, ignored);
+}
+
 void feedback_timeout() {
     FeedbackPeer peer;
     require(peer.command().mode == 2, "Fresh AUTO_AIM fixture cannot fire");
@@ -198,6 +261,7 @@ int main(int argc, char** argv) {
         else if (scenario == "feedback_timeout") feedback_timeout();
         else if (scenario == "pose_history") pose_history();
         else if (scenario == "feedback_alignment") feedback_alignment();
+        else if (scenario == "reconnect") reconnect();
         else if (scenario == "mode_session") mode_session();
         else throw std::runtime_error("Unknown scenario: " + scenario);
         std::cout << "PASS " << scenario << '\n';

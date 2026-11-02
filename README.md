@@ -62,6 +62,7 @@ USB 相机 → YOLOv8 → 数字分类 → PnP / 装甲板朝向角优化
 | `tracker.enemy_color` | `red` | 敌方颜色，运行前按己方阵营检查 |
 | `tracker.priority_mode` | `1` | 模式 1 优先 3/4 号，模式 2 优先 2 号 |
 | `gimbal.com_port` | `/dev/ttyUSB0` | 云台串口设备 |
+| `gimbal.reconnect_delay_ms` | `250` | 串口断开后的重连间隔；重连前保持 IDLE/禁射 |
 | `planner.auto_fire` | `false` | 自动开火开关 |
 
 自动开火保持关闭，直到串口协议、坐标方向、标定和 MPC 输出都已在测试台上确认。正式入口使用 Planner/TinyMPC；`Aimer`、`Shooter` 保留在源码中，当前入口不调用它们。

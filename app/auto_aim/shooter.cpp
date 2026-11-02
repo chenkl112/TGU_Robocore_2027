@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "tools/math_tools.hpp"
 #include "tools/tomlpp.hpp"
 
 namespace app::auto_aim {
@@ -26,9 +27,11 @@ bool Shooter::shoot(
         target_distance > judge_distance_ ? second_tolerance_ : first_tolerance_;
 
     const bool command_is_stable =
-        std::abs(last_command_.yaw - command.yaw) < tolerance * 2.0;
+        std::abs(tools::limit_rad(last_command_.yaw - command.yaw)) < tolerance * 2.0 &&
+        std::abs(last_command_.pitch - command.pitch) < tolerance * 2.0;
     const bool gimbal_is_aligned =
-        std::abs(gimbal_position[0] - last_command_.yaw) < tolerance;
+        std::abs(tools::limit_rad(gimbal_position[0] - last_command_.yaw)) < tolerance &&
+        std::abs(gimbal_position[1] - last_command_.pitch) < tolerance;
 
     last_command_ = command;
     return command_is_stable && gimbal_is_aligned && aimer.debug_aim_point.valid;

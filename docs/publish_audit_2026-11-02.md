@@ -93,3 +93,31 @@
 | 第三方版权例外 | PASS | 仍仅命中 .publish-allow:11、.publish-allow:12、.publish-allow:13 已批准的 3 处邮箱，无新增例外 |
 
 可上传。三道闸通过，提交信息使用 `fix(auto_aim): 按模型语义保留强透视角点对应`。推送后核对远端提交和仓库可见性。
+
+## 余留风险补修的提交闸门
+
+本轮基于 `auto-aim-v0.1` 的 `71f5853`，补修图中指出的 Shooter pitch 对准和 Gimbal 自动重连；目标仍为 `auto-aim-v0.1`。
+
+### 格式闸
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| README 配置说明同步 | PASS | README.md、README.zh-CN.md、README.en.md 的 gimbal 表格包含 `reconnect_delay_ms` |
+| 行为说明与实现一致 | PASS | app/auto_aim/README.md 说明 Shooter yaw/pitch 和重连行为；docs/review_2026-11-02.md 更新余留风险状态 |
+| 验证声明有证据 | PASS | Release CTest 53/53、串口/云台 ASan+UBSan 22/22；gimbal.reconnect 重复 5 次通过 |
+
+### 耦合闸
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 本机路径和临时文件 | PASS | 新增测试使用临时目录和伪终端，测试退出清理；无本机绝对路径进入提交 |
+| 构建产物和日志 | PASS | `.gitignore:7` 排除 build；提交前只暂存源代码、配置、文档和测试 |
+
+### 隐私闸
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 凭据、私钥、内部地址 | PASS | 全仓文本和本地可达历史复扫无未批准命中 |
+| 第三方版权邮箱 | PASS | 仅保留 `.publish-allow:11`、`.publish-allow:12`、`.publish-allow:13` 的既有版权例外 |
+
+可上传。三道闸通过，提交信息使用 `fix(auto_aim): 补齐发弹校验与串口自动重连`。

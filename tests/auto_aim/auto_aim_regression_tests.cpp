@@ -1,4 +1,6 @@
 #include "app/auto_aim/planner/planner.hpp"
+#include "app/auto_aim/aimer.hpp"
+#include "app/auto_aim/shooter.hpp"
 #include "app/auto_aim/solver.hpp"
 #include "app/auto_aim/tracker.hpp"
 #include "app/auto_aim/yolos/keypoints.hpp"
@@ -17,6 +19,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 
 using namespace std::chrono_literals;
 using namespace app::auto_aim;
@@ -87,6 +90,31 @@ int main(int argc, char** argv) {
             Planner planner(config);
             const auto plan = planner.plan(world_target(t0), 22);
             require(plan.control && !plan.fire, "Static target requested fire without actual gimbal feedback");
+        } else if (scenario == "shooter_alignment") {
+            const auto path = std::filesystem::temp_directory_path() /
+                ("robocore-shooter-" + std::to_string(t0.time_since_epoch().count()) + ".toml");
+            std::ifstream input(config);
+            std::ostringstream contents;
+            contents << input.rdbuf();
+            auto text = contents.str();
+            const auto marker = std::string{"auto_fire = false"};
+            const auto position = text.find(marker, text.find("[shooter]"));
+            require(position != std::string::npos, "Shooter fixture is missing auto_fire");
+            text.replace(position, marker.size(), "auto_fire = true");
+            std::ofstream(path) << text;
+            Aimer aimer(path.string());
+            Shooter shooter(path.string());
+            aimer.debug_aim_point.valid = true;
+            const std::list<Target> targets{world_target(t0)};
+            io::Command command;
+            command.control = true;
+            require(!shooter.shoot(command, aimer, targets, {0, 0.1, 0}),
+                    "Shooter fired with a pitch-misaligned gimbal");
+            require(!shooter.shoot(command, aimer, targets, {0.1, 0, 0}),
+                    "Shooter fired with a yaw-misaligned gimbal");
+            require(shooter.shoot(command, aimer, targets, {0, 0, 0}),
+                    "Shooter rejected aligned yaw/pitch feedback");
+            std::filesystem::remove(path);
         } else if (scenario == "feedback_alignment") {
             Planner planner(config);
             const auto target = world_target(t0);

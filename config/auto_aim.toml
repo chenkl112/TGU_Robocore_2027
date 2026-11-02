@@ -113,3 +113,4 @@ com_port = "/dev/ttyUSB0"
 baudrate = 115200
 # Treat silent feedback as IDLE; a resumed stream starts a new tracking session.
 feedback_timeout_ms = 100
+reconnect_delay_ms = 250

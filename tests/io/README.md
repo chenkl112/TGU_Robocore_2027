@@ -35,6 +35,7 @@ ctest --test-dir build/io-release --output-on-failure
 | `gimbal.silent_start` | 对端保持打开且静默时，3 秒首包超时包含线程清理后仍能返回 |
 | `gimbal.idle_shutdown` | 收到有效的空闲反馈后，对端静默，析构可以结束接收线程 |
 | `gimbal.feedback_alignment` | yaw/pitch 未对准时禁射，对准与跨周角度可发弹；合法反馈前插入假 SP 仍能同步 |
+| `gimbal.reconnect` | 端口断开后保持 IDLE，替换同一路径的串口设备后自动重连并创建新会话 |
 
 ## Sanitizer
 

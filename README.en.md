@@ -62,6 +62,7 @@ The program opens the gimbal serial port before the camera. Missing devices or s
 | `tracker.enemy_color` | `red` | Enemy color; check against your team's side before running |
 | `tracker.priority_mode` | `1` | Mode 1 prioritizes robots 3/4; mode 2 prioritizes robot 2 |
 | `gimbal.com_port` | `/dev/ttyUSB0` | Gimbal serial device |
+| `gimbal.reconnect_delay_ms` | `250` | Serial reconnect interval; output stays IDLE/fire-disabled until feedback returns |
 | `planner.auto_fire` | `false` | Automatic fire switch |
 
 Keep automatic fire disabled until the serial protocol, coordinate signs, calibration and MPC outputs have been checked on a test rig. The hardware entry point uses Planner/TinyMPC. `Aimer` and `Shooter` remain in the source but are not called by this entry point.

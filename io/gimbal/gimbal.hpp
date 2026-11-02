@@ -38,6 +38,9 @@ public:
 private:
     Serial serial_;
 
+    std::string com_port_;
+    int baudrate_ = 115200;
+
     std::thread thread_;
     std::atomic<bool> quit_{false};
     mutable std::mutex mutex_;
@@ -46,6 +49,7 @@ private:
 
     double fire_thresh_ = 0.05;
     std::chrono::milliseconds feedback_timeout_{100};
+    std::chrono::milliseconds reconnect_delay_{250};
     std::chrono::steady_clock::time_point last_packet_{};
     std::chrono::steady_clock::time_point session_started_{};
     uint64_t session_ = 0;
