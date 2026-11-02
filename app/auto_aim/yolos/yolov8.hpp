@@ -57,7 +57,6 @@ private:
         double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count);
     void draw_detections(
         const cv::Mat& img, const std::list<Armor>& armors, int frame_count) const;
-    void sort_keypoints(std::vector<cv::Point2f>& keypoints);
 };
 
 }  // namespace app::auto_aim

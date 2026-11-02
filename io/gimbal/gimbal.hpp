@@ -44,6 +44,7 @@ private:
     std::condition_variable first_packet_cv_;
     bool first_packet_received_ = false;
 
+    double fire_thresh_ = 0.05;
     std::chrono::milliseconds feedback_timeout_{100};
     std::chrono::steady_clock::time_point last_packet_{};
     std::chrono::steady_clock::time_point session_started_{};

@@ -27,7 +27,7 @@ add_executable(auto_aim_regression_tests
 target_include_directories(auto_aim_regression_tests PRIVATE ${REPO} ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(auto_aim_regression_tests PRIVATE Eigen3::Eigen tinympcstatic ${OpenCV_LIBS} Threads::Threads)
 foreach(scenario IN ITEMS tracking_confirmation priority_switch association_gate planner_expiry
-        planner_acceleration_bounds invalid_numeric lost_target_fire pose_validation calibration_validation camera_timeout trajectory)
+        feedback_alignment tilted_keypoints fire_without_feedback observation_expiry moving_intercept planner_acceleration_bounds invalid_numeric lost_target_fire pose_validation calibration_validation camera_timeout trajectory)
     add_test(NAME auto_aim.${scenario} COMMAND auto_aim_regression_tests ${scenario} ${REPO}/config/auto_aim.toml)
     set_tests_properties(auto_aim.${scenario} PROPERTIES TIMEOUT 15 WORKING_DIRECTORY ${REPO})
 endforeach()

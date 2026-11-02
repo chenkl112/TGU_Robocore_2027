@@ -89,11 +89,12 @@ judge_distance = 3.0
 auto_fire = false
 
 [planner]
-# Reject targets older than this many seconds, including camera/inference stalls.
+# Maximum age of the last accepted observation; prediction/empty frames do not refresh it.
 max_target_age = 0.1
 # 参数移植自 sp_vision_25 standard_mpc，偏移和延迟仍需实车标定。
 yaw_offset = -0.8
 pitch_offset = -1.0
+# Radians: both MPC tracking error and actual yaw/pitch alignment must pass.
 fire_thresh = 0.0035
 decision_speed = 10.0
 high_speed_delay_time = 0.026

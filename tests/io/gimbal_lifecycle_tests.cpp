@@ -93,7 +93,7 @@ public:
     std::jthread sender;
     std::unique_ptr<io::Gimbal> device;
 
-    FeedbackPeer() : sender([&](std::stop_token stop) {
+    explicit FeedbackPeer(bool prepend_false_header = false) : sender([&, prepend_false_header](std::stop_token stop) {
         while (!stop.stop_requested()) {
             if (active) {
                 io::GimbalToVision packet{};
@@ -101,6 +101,10 @@ public:
                 packet.q[0] = 1;
                 packet.bullet_speed = 22;
                 packet.crc16 = tools::get_crc16(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet) - 2);
+                if (prepend_false_header) {
+                    const auto count = ::write(pty.master(), packet.head, 2);
+                    if (count != 2) return;
+                }
                 const auto count = ::write(pty.master(), &packet, sizeof(packet));
                 if (count < 0 && errno != EAGAIN && errno != EINTR) return;
             }
@@ -115,8 +119,8 @@ public:
         sender.join();
         device.reset();
     }
-    io::VisionToGimbal command(float yaw = 1, std::optional<uint64_t> session = std::nullopt) {
-        device->send(true, true, yaw, 0, 0, 0, 0, 0, session);
+    io::VisionToGimbal command(float yaw = 0, std::optional<uint64_t> session = std::nullopt, float pitch = 0) {
+        device->send(true, true, yaw, 0, 0, pitch, 0, 0, session);
         io::VisionToGimbal result{};
         auto* bytes = reinterpret_cast<uint8_t*>(&result);
         size_t count = 0;
@@ -161,6 +165,14 @@ void pose_history() {
     require(threw && Clock::now() - start < 500ms, "Missing future IMU pose blocked indefinitely");
 }
 
+void feedback_alignment() {
+    FeedbackPeer peer(true); // Every feedback packet is preceded by a fake SP header.
+    require(peer.command(0.1f).mode == 1, "Yaw misalignment reached the wire as fire");
+    require(peer.command(0, std::nullopt, 0.1f).mode == 1, "Pitch misalignment reached the wire as fire");
+    require(peer.command().mode == 2, "Aligned feedback could not fire after CRC resynchronization");
+    require(peer.command(2 * std::acos(-1.0)).mode == 2, "Wrapped aligned yaw could not fire");
+}
+
 void mode_session() {
     FeedbackPeer peer;
     const auto original = peer.device->session();
@@ -171,7 +183,7 @@ void mode_session() {
     std::this_thread::sleep_for(20ms);
     require(peer.device->session() != original, "Mode cycle reused the old tracking session");
     require(peer.command(1, original).mode == 0, "Old plan survived an IDLE/AUTO_AIM mode cycle");
-    require(peer.command(1, peer.device->session()).mode == 2, "New tracking session cannot control");
+    require(peer.command(0, peer.device->session()).mode == 2, "New tracking session cannot control");
     require(peer.command(std::numeric_limits<float>::quiet_NaN()).mode == 0, "NaN control reached the wire");
 }
 }  // namespace
@@ -185,6 +197,7 @@ int main(int argc, char** argv) {
         else if (scenario == "idle_shutdown") idle_shutdown();
         else if (scenario == "feedback_timeout") feedback_timeout();
         else if (scenario == "pose_history") pose_history();
+        else if (scenario == "feedback_alignment") feedback_alignment();
         else if (scenario == "mode_session") mode_session();
         else throw std::runtime_error("Unknown scenario: " + scenario);
         std::cout << "PASS " << scenario << '\n';

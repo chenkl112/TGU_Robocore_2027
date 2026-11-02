@@ -37,3 +37,31 @@
 | 二进制扫描边界 | PASS | .publish-allow:15；模型和 Foxglove 库是基线已有文件，本次未新增或替换，未将二进制文本扫描当作其内容审计 |
 
 可上传。三道闸均通过，无未处理阻断项。提交信息使用 `fix(auto_aim): 修复全量审查发现的P1问题`。推送后需核对远端分支提交与本地 HEAD 一致，并回读仓库可见性。
+
+## 二次审查补修的提交闸门
+
+本轮基于 `auto-aim-v0.1` 的 `30e62b8`，提交用户指出的 2 项 P1 和 3 项 P2 修复，目标分支仍为 `auto-aim-v0.1`。
+
+### 格式闸
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 行为与回归结果同步 | PASS | docs/review_2026-11-02.md:59、docs/review_2026-11-02.md:69；Release 49/49、串口/云台 ASan+UBSan 21/21 通过 |
+| 接口说明与实现一致 | PASS | io/serial/README.md:29 说明消费前校验；io/serial/serial.hpp:89 在验证失败时只消费一个字节；app/auto_aim/README.md:46 说明缺失反馈时禁射 |
+| 文档链接、代码块和空白 | PASS | README、docs、模块及测试说明的相对链接和代码块检查通过；git diff --check 无错误 |
+
+### 耦合闸
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 本机路径和私有服务 | PASS | 全仓已跟踪文本复扫无未批准命中；新增用例以临时目录生成标定，测试结束清理，见 tests/auto_aim/auto_aim_regression_tests.cpp |
+| 依赖与生成物 | PASS | tests/auto_aim/CMakeLists.txt:29、tests/io/CMakeLists.txt:51 注册新场景；.gitignore:7 排除构建产物，本轮没有新增二进制、日志或环境配置 |
+
+### 隐私闸
+
+| 项目 | 结果 | 证据 |
+|---|---|---|
+| 当前文本及历史凭据 | PASS | 对全仓文本及本地可达历史新增行复扫，未发现凭据、私钥或带密码连接串 |
+| 公开版权联系方式 | PASS | 仍仅命中 .publish-allow:11、.publish-allow:12、.publish-allow:13 已批准的 3 处第三方版权邮箱；没有新增例外 |
+
+可上传。三道闸通过，提交信息使用 `fix(auto_aim): 补齐发弹校验与截击观测同步`。推送后核对远端提交与本地 HEAD 一致。

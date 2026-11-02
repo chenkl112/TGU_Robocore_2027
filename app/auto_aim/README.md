@@ -40,3 +40,19 @@ included.
 4. Tune Tracker and Planner values through offline replay.
 5. Verify MPC angle, angular-velocity and angular-acceleration outputs on a disabled-friction-wheel rig.
 6. Enable `[planner].auto_fire` only after the previous checks pass.
+
+## Fire and freshness checks
+
+`Planner::plan` accepts optional `io::GimbalState` feedback. Calls without feedback can
+produce a control plan but always return `fire = false`. Live feedback includes a local
+receive timestamp; both yaw and pitch must be within `planner.fire_thresh` of the
+interception reference. Gimbal rechecks the latest feedback against the outgoing command.
+
+`Target::timestamp()` is the predicted state time. `observation_timestamp()` is the time
+of the last accepted measurement; prediction, empty frames and rejected measurements do
+not refresh it. The live entry point and Planner enforce `planner.max_target_age` using
+that measurement time. Every MPC sample solves its own ballistic interception time.
+
+The YOLO corner adapter identifies the two opposite lightbar edges of a convex armor
+silhouette before arranging corners for PnP. The regression suite covers visible armor
+at roll angles up to ±70 degrees; fully side-on or occluded armor needs further data.

@@ -8,6 +8,7 @@
 #include <string>
 
 #include "../target.hpp"
+#include "io/command.hpp"
 #include "tinympc/tiny_api.hpp"
 
 namespace app::auto_aim {
@@ -39,12 +40,15 @@ public:
     Planner(const Planner&) = delete;
     Planner& operator=(const Planner&) = delete;
 
-    Plan plan(Target target, double bullet_speed);
+    Plan plan(Target target, double bullet_speed,
+              std::optional<io::GimbalState> feedback = std::nullopt);
     Plan plan(std::optional<Target> target, double bullet_speed,
-              std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+              std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now(),
+              std::optional<io::GimbalState> feedback = std::nullopt);
 
 private:
     double max_target_age_;
+    std::chrono::milliseconds feedback_timeout_{100};
     double yaw_offset_;
     double pitch_offset_;
     double fire_thresh_;

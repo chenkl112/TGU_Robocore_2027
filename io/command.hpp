@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 
 namespace io {
 
@@ -46,6 +47,8 @@ struct __attribute__((packed)) VisionToGimbal {
 enum class GimbalMode { IDLE, AUTO_AIM, SMALL_BUFF, BIG_BUFF };
 
 struct GimbalState {
+    // Local receive time; not part of the packed wire protocol.
+    std::chrono::steady_clock::time_point received_at{};
     float yaw = 0;
     float yaw_vel = 0;
     float pitch = 0;

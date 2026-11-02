@@ -21,6 +21,7 @@ Target::Target(
       update_count_(0),
       armor_num_(armor_num),
       t_(t),
+      last_observation_(t),
       is_switch_(false),
       is_converged_(false),
       switch_count_(0) {
@@ -159,6 +160,7 @@ bool Target::update(const Armor& armor, double max_match_distance) {
     update_count_++;
 
     update_ypda(armor, id);
+    last_observation_ = t_;
     return true;
 }
 
@@ -200,12 +202,18 @@ Eigen::VectorXd Target::ekf_x() const { return ekf_.x; }
 
 const tools::ExtendedKalmanFilter& Target::ekf() const { return ekf_; }
 
-std::vector<Eigen::Vector4d> Target::armor_xyza_list() const {
+std::vector<Eigen::Vector4d> Target::armor_xyza_list(double dt) const {
     std::vector<Eigen::Vector4d> _armor_xyza_list;
-
+    // Planning needs only kinematics, not covariance propagation for each root evaluation.
+    auto x = ekf_.x;
+    if (x.size() != 11) return {};
+    x[0] += x[1] * dt;
+    x[2] += x[3] * dt;
+    x[4] += x[5] * dt;
+    x[6] = tools::limit_rad(x[6] + x[7] * dt);
     for (int i = 0; i < armor_num_; i++) {
-        auto angle = tools::limit_rad(ekf_.x[6] + i * 2 * CV_PI / armor_num_);
-        Eigen::Vector3d xyz = h_armor_xyz(ekf_.x, i);
+        auto angle = tools::limit_rad(x[6] + i * 2 * CV_PI / armor_num_);
+        Eigen::Vector3d xyz = h_armor_xyz(x, i);
         _armor_xyza_list.push_back({xyz[0], xyz[1], xyz[2], angle});
     }
     return _armor_xyza_list;

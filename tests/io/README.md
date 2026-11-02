@@ -25,6 +25,7 @@ ctest --test-dir build/io-release --output-on-failure
 | `serial.read_timeout`、`serial.close_read` | 无数据时有界返回，另一个线程关闭后可以结束接收 |
 | `serial.fragmented`、`serial.subscriptions` | 半包、多包和同类型多个回调都能正确组包 |
 | `serial.isolated_ports`、`serial.reopen` | 两个端口不能合成一个包，重开后旧半包不残留且订阅保留 |
+| `serial.false_header` | CRC 校验失败后逐字节重同步，假帧头、坏 CRC 和分片不吞合法包 |
 | `serial.failed_open` | 端口配置失败无描述符泄漏，随后可以重新打开并发送 |
 | `serial.disconnect` | 对端关闭后识别断线，继续调用接收时不会忙循环 |
 | `serial.write_timeout`、`serial.close_write` | 对端不读取造成背压时，超时或主动关闭均能结束发送 |
@@ -33,6 +34,7 @@ ctest --test-dir build/io-release --output-on-failure
 | `serial.concurrent` | 收发、查询、关闭、重开和注册回调交错执行 |
 | `gimbal.silent_start` | 对端保持打开且静默时，3 秒首包超时包含线程清理后仍能返回 |
 | `gimbal.idle_shutdown` | 收到有效的空闲反馈后，对端静默，析构可以结束接收线程 |
+| `gimbal.feedback_alignment` | yaw/pitch 未对准时禁射，对准与跨周角度可发弹；合法反馈前插入假 SP 仍能同步 |
 
 ## Sanitizer
 

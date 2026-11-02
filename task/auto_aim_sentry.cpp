@@ -141,11 +141,11 @@ int run(int argc, char* argv[]) {
                 app::auto_aim::Plan plan{};
                 if (gimbal.mode() == io::GimbalMode::AUTO_AIM &&
                     snapshot.session == gimbal.session()) {
-                    plan = planner.plan(snapshot.target, gs.bullet_speed);
+                    plan = planner.plan(snapshot.target, gs.bullet_speed, std::chrono::steady_clock::now(), gs);
                 }
                 if (snapshot.target &&
                     std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                  snapshot.target->timestamp()).count() > max_target_age) {
+                                                  snapshot.target->observation_timestamp()).count() > max_target_age) {
                     plan = {};
                 }
                 if (quit || interrupted || stop.stop_requested()) break;

@@ -31,16 +31,15 @@ int main() {
     serial.open("/dev/ttyACM0", 2000000);
 
     serial.recv<RecvPackage>([](const auto &pkt) {
-        if (!tools::check_crc16(reinterpret_cast<const uint8_t *>(&pkt), sizeof(RecvPackage))) {
-            LOG_WARN(MODULE, "CRC校验失败");
-            return;
-        }
         LOG_INFO(MODULE, "{}", pkt.data);
+    }, [](const RecvPackage& pkt) {
+        return tools::check_crc16(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt));
     });
 
     while (true) {
         serial.spin_once();
         sendpkg.data++;
+        sendpkg.crc16 = tools::get_crc16(reinterpret_cast<const uint8_t*>(&sendpkg), sizeof(sendpkg) - 2);
         serial.send(sendpkg);
     }
 }

@@ -1,6 +1,7 @@
 #include "planner.hpp"
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -24,6 +25,9 @@ Planner::Planner(const std::string& config_path) {
     high_speed_delay_time_ = config["planner"]["high_speed_delay_time"].value_or(0.12);
     low_speed_delay_time_ = config["planner"]["low_speed_delay_time"].value_or(0.12);
 
+    const int feedback_timeout_ms = config["gimbal"]["feedback_timeout_ms"].value_or(100);
+    if (feedback_timeout_ms <= 0) throw std::runtime_error("gimbal.feedback_timeout_ms must be positive");
+    feedback_timeout_ = std::chrono::milliseconds(feedback_timeout_ms);
     max_target_age_ = config["planner"]["max_target_age"].value_or(0.1);
     if (!std::isfinite(max_target_age_) || max_target_age_ <= 0) {
         throw std::runtime_error("planner.max_target_age must be finite and positive");
@@ -58,31 +62,12 @@ void Planner::cleanup() {
     yaw_solver_ = pitch_solver_ = nullptr;
 }
 
-Plan Planner::plan(Target target, double bullet_speed) {
+Plan Planner::plan(Target target, double bullet_speed, std::optional<io::GimbalState> feedback) {
     const auto state = target.ekf_x();
     if (state.size() != 11 || !state.allFinite() || !std::isfinite(bullet_speed)) return {false};
     if (bullet_speed < 10 || bullet_speed > 25) {
         bullet_speed = 22;
     }
-
-    const auto armor_xyza = target.armor_xyza_list();
-    if (armor_xyza.empty()) return {false};
-
-    Eigen::Vector3d xyz = Eigen::Vector3d::Zero();
-    auto min_dist = 1e10;
-    for (const auto& xyza : armor_xyza) {
-        auto dist = xyza.head<2>().norm();
-        if (dist < min_dist) {
-            min_dist = dist;
-            xyz = xyza.head<3>();
-        }
-    }
-    auto bullet_traj = tools::Trajectory(bullet_speed, min_dist, xyz.z());
-    if (bullet_traj.unsolvable) {
-        LOG_WARN(MODULE, "Unsolvable initial bullet trajectory");
-        return {false};
-    }
-    target.predict(bullet_traj.fly_time);
 
     double yaw0;
     Trajectory traj;
@@ -139,7 +124,13 @@ Plan Planner::plan(Target target, double bullet_speed) {
     plan.pitch_acc = pitch_solver_->solution->u(0, HALF_HORIZON);
 
     auto shoot_offset_ = 2;
-    plan.fire = target.observed && yaw_status == 0 && pitch_status == 0 && std::hypot(
+    const auto now = std::chrono::steady_clock::now();
+    const bool aligned = feedback && feedback->received_at <= now &&
+        now - feedback->received_at <= feedback_timeout_ &&
+        std::isfinite(feedback->yaw) && std::isfinite(feedback->pitch) &&
+        std::hypot(tools::limit_rad(plan.target_yaw - feedback->yaw),
+                   plan.target_pitch - feedback->pitch) < fire_thresh_;
+    plan.fire = aligned && target.observed && yaw_status == 0 && pitch_status == 0 && std::hypot(
                     traj(0, HALF_HORIZON + shoot_offset_)
                         - yaw_x(0, HALF_HORIZON + shoot_offset_),
                     traj(2, HALF_HORIZON + shoot_offset_)
@@ -149,11 +140,12 @@ Plan Planner::plan(Target target, double bullet_speed) {
 }
 
 Plan Planner::plan(std::optional<Target> target, double bullet_speed,
-                   std::chrono::steady_clock::time_point now) {
+                   std::chrono::steady_clock::time_point now, std::optional<io::GimbalState> feedback) {
     if (!target.has_value()) return {false};
     const double age = std::chrono::duration<double>(now - target->timestamp()).count();
+    const double observation_age = std::chrono::duration<double>(now - target->observation_timestamp()).count();
     const auto state = target->ekf_x();
-    if (age < 0 || age > max_target_age_ || state.size() != 11 || !state.allFinite()) return {false};
+    if (age < 0 || age > max_target_age_ || observation_age < 0 || observation_age > max_target_age_ || state.size() != 11 || !state.allFinite()) return {false};
 
     double delay_time = std::abs(target->ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_
                                                                        : low_speed_delay_time_;
@@ -163,7 +155,7 @@ Plan Planner::plan(std::optional<Target> target, double bullet_speed,
 
     target->predict(future);
 
-    return plan(*target, bullet_speed);
+    return plan(*target, bullet_speed, feedback);
 }
 
 void Planner::setup_yaw_solver(const std::string& config_path) {
@@ -253,28 +245,45 @@ void Planner::setup_pitch_solver(const std::string& config_path) {
 }
 
 Eigen::Matrix<double, 2, 1> Planner::aim(const Target& target, double bullet_speed) {
-    const auto armor_xyza = target.armor_xyza_list();
-    if (armor_xyza.empty()) throw std::runtime_error("target has no armor states");
-
-    Eigen::Vector3d xyz = Eigen::Vector3d::Zero();
-    double yaw = 0.0;
-    auto min_dist = 1e10;
-
-    for (const auto& xyza : armor_xyza) {
-        auto dist = xyza.head<2>().norm();
-        if (dist < min_dist) {
-            min_dist = dist;
-            xyz = xyza.head<3>();
-            yaw = xyza[3];
+    // Solve each physical armor separately: switching armor IDs inside the root
+    // search makes flight time discontinuous when alternating plates have different z.
+    const auto armors = target.armor_xyza_list();
+    double best_distance = std::numeric_limits<double>::infinity();
+    Eigen::Vector2d angles;
+    for (std::size_t id = 0; id < armors.size(); ++id) {
+        Eigen::Vector4d armor;
+        auto evaluate = [&](double time) {
+            armor = target.armor_xyza_list(time)[id];
+            if (!armor.allFinite()) return tools::Trajectory(0, 0, 0);
+            return tools::Trajectory(bullet_speed, armor.head<2>().norm(), armor.z());
+        };
+        const auto initial = evaluate(0);
+        if (initial.unsolvable) continue;
+        double lower = 0;
+        double upper = initial.fly_time;
+        auto trajectory = evaluate(upper);
+        for (int i = 0; !trajectory.unsolvable && trajectory.fly_time > upper && i < 30; ++i) {
+            upper *= 1.5;
+            trajectory = evaluate(upper);
         }
+        if (trajectory.unsolvable || trajectory.fly_time > upper) continue;
+        bool converged = false;
+        for (int i = 0; i < 50; ++i) {
+            const double time = (lower + upper) * 0.5;
+            trajectory = evaluate(time);
+            if (trajectory.unsolvable) break;
+            if (std::abs(trajectory.fly_time - time) < 1e-7) { converged = true; break; }
+            if (trajectory.fly_time > time) lower = time;
+            else upper = time;
+        }
+        if (!converged || armor.head<2>().norm() >= best_distance) continue;
+        best_distance = armor.head<2>().norm();
+        debug_xyza = armor;
+        angles << tools::limit_rad(std::atan2(armor.y(), armor.x()) + yaw_offset_),
+                  -trajectory.pitch - pitch_offset_;
     }
-    debug_xyza = Eigen::Vector4d(xyz.x(), xyz.y(), xyz.z(), yaw);
-
-    auto azim = std::atan2(xyz.y(), xyz.x());
-    auto bullet_traj = tools::Trajectory(bullet_speed, min_dist, xyz.z());
-    if (bullet_traj.unsolvable) throw std::runtime_error("Unsolvable bullet trajectory!");
-
-    return {tools::limit_rad(azim + yaw_offset_), -bullet_traj.pitch - pitch_offset_};
+    if (!std::isfinite(best_distance)) throw std::runtime_error("No converged interception trajectory");
+    return angles;
 }
 
 Trajectory Planner::get_trajectory(Target& target, double yaw0, double bullet_speed) {

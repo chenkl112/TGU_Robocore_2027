@@ -26,8 +26,8 @@ Packet packet(uint32_t value = 42) {
 const uint8_t* bytes(const Packet& value) { return reinterpret_cast<const uint8_t*>(&value); }
 void subscribe(io::Serial& serial, std::vector<uint32_t>& received) {
     serial.recv<Packet>([&received](const Packet& value) {
-        if (tools::check_crc16(bytes(value), sizeof(value))) received.push_back(value.value);
-    });
+        received.push_back(value.value);
+    }, [](const Packet& value) { return tools::check_crc16(bytes(value), sizeof(value)); });
 }
 void open(io::Serial& serial, const Pty& pty) {
     require(serial.open(pty.name(), 115200), "Cannot open test serial port");
@@ -89,6 +89,31 @@ void fragmented(bool multiple_subscriptions) {
         require(invocation_counts == std::vector<int>({1, 2, 3}),
                 "Stateful callback was copied or reset between receive batches");
     }
+}
+void false_header() {
+    Pty pty;
+    io::Serial serial;
+    open(serial, pty);
+    std::vector<uint32_t> received;
+    subscribe(serial, received);
+    const auto valid = packet(123);
+    std::vector<uint8_t> stream{valid.head[0], valid.head[1]};
+    stream.insert(stream.end(), bytes(valid), bytes(valid) + sizeof(valid));
+    pty.send(stream.data(), stream.size());
+    serial.spin_once();
+    require(received == std::vector<uint32_t>{123}, "False header swallowed the following valid CRC packet");
+    auto corrupt = packet(456);
+    corrupt.crc ^= 1;
+    const auto second = packet(789);
+    stream.assign(bytes(corrupt), bytes(corrupt) + sizeof(corrupt));
+    stream.insert(stream.end(), {valid.head[0], valid.head[1], valid.head[0]});
+    stream.insert(stream.end(), bytes(second), bytes(second) + sizeof(second));
+    for (const auto byte : stream) {
+        pty.send(&byte, 1);
+        serial.spin_once();
+    }
+    require(received == std::vector<uint32_t>({123,789}), "Fragmented corrupt/false headers lost or duplicated a frame");
+
 }
 void isolated_ports() {
     Pty pty_a, pty_b;
@@ -318,6 +343,7 @@ int main(int argc, char** argv) {
         else if (scenario == "close_read") close_read();
         else if (scenario == "fragmented") fragmented(false);
         else if (scenario == "subscriptions") fragmented(true);
+        else if (scenario == "false_header") false_header();
         else if (scenario == "isolated_ports") isolated_ports();
         else if (scenario == "reopen") reopen();
         else if (scenario == "failed_open") failed_open();

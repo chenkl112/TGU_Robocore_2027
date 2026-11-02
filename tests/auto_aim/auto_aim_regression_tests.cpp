@@ -5,8 +5,11 @@
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
 #include "tools/trajectory.hpp"
+#include "tools/tomlpp.hpp"
 
 #include <chrono>
+#include <array>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <fstream>
@@ -80,6 +83,112 @@ int main(int argc, char** argv) {
                 std::list<Armor> armors{image_armor(solver)};
                 require(tracker.track(armors, t0 + 50ms).empty(), "Reset preserved an acquired target");
             }
+        } else if (scenario == "fire_without_feedback") {
+            Planner planner(config);
+            const auto plan = planner.plan(world_target(t0), 22);
+            require(plan.control && !plan.fire, "Static target requested fire without actual gimbal feedback");
+        } else if (scenario == "feedback_alignment") {
+            Planner planner(config);
+            const auto target = world_target(t0);
+            const auto reference = planner.plan(target, 22);
+            io::GimbalState feedback;
+            feedback.received_at = Clock::now();
+            feedback.yaw = reference.target_yaw + 0.1f;
+            feedback.pitch = reference.target_pitch;
+            require(!planner.plan(target, 22, feedback).fire, "Yaw-misaligned gimbal requested fire");
+            feedback.yaw = reference.target_yaw;
+            feedback.pitch = reference.target_pitch + 0.1f;
+            require(!planner.plan(target, 22, feedback).fire, "Pitch-misaligned gimbal requested fire");
+            feedback.pitch = reference.target_pitch;
+            feedback.received_at = Clock::now() - 1s;
+            require(!planner.plan(target, 22, feedback).fire, "Stale feedback requested fire");
+            feedback.received_at = Clock::now() + 1s;
+            require(!planner.plan(target, 22, feedback).fire, "Future feedback requested fire");
+            feedback.received_at = Clock::now();
+            feedback.yaw = reference.target_yaw + 2 * CV_PI;
+            require(planner.plan(target, 22, feedback).fire, "Aligned wrapped yaw cannot fire");
+            feedback.pitch = std::numeric_limits<float>::quiet_NaN();
+            require(!planner.plan(target, 22, feedback).fire, "Nonfinite feedback requested fire");
+        } else if (scenario == "observation_expiry") {
+            Solver solver(config);
+            Tracker tracker(config, solver);
+            Planner planner(config);
+            std::list<Target> targets;
+            for (int i = 0; i < 5; ++i) {
+                std::list<Armor> armors{image_armor(solver)};
+                targets = tracker.track(armors, t0 + i * 30ms);
+            }
+            require(!targets.empty(), "Failed to acquire expiry fixture");
+            const auto observed_at = t0 + 120ms;
+            for (int i = 1; i <= 22; ++i) {
+                const auto now = observed_at + i * 30ms;
+                // An out-of-gate same-ID observation is no fresher than no observation.
+                std::list<Armor> armors;
+                if (i % 2 == 0) armors.push_back(image_armor(solver, ArmorName::three, {3, 2, 0}));
+                targets = tracker.track(armors, now);
+                require(!targets.empty(), "Expiry fixture lost its predicted track before the count limit");
+                require(targets.front().observation_timestamp() == observed_at,
+                        "Rejected/empty frame changed the last observation timestamp");
+                if (now - observed_at > 100ms) {
+                    require(!planner.plan(std::optional{targets.front()}, 22, now).control,
+                            "Empty/rejected observations refreshed the target age");
+                }
+            }
+            const auto recovered_at = observed_at + 690ms;
+            std::list<Armor> recovered{image_armor(solver)};
+            targets = tracker.track(recovered, recovered_at);
+            require(!targets.empty() && targets.front().observation_timestamp() == recovered_at &&
+                    planner.plan(std::optional{targets.front()}, 22, recovered_at).control,
+                    "A fresh accepted observation did not restore control");
+        } else if (scenario == "moving_intercept") {
+            Planner planner(config);
+            auto target = world_target(t0);
+            // Inject an exact initial condition for the independent ballistic oracle.
+            auto& state = const_cast<tools::ExtendedKalmanFilter&>(target.ekf()).x;
+            state[0] = 8.2; state[1] = 3; state[3] = 3;
+            const auto cfg = toml::parse_file(config);
+            const auto position_at = [&](double time) -> Eigen::Vector3d {
+                auto future = target;
+                future.predict(time);
+                Eigen::Vector3d closest;
+                double distance = std::numeric_limits<double>::infinity();
+                for (const auto& armor : future.armor_xyza_list()) {
+                    if (armor.head<2>().norm() < distance) {
+                        distance = armor.head<2>().norm();
+                        closest = armor.head<3>();
+                    }
+                }
+                return closest;
+            };
+            double lo = 0, hi = 1;
+            for (int i = 0; i < 80; ++i) {
+                const double t = (lo + hi) * 0.5;
+                const auto p = position_at(t);
+                tools::Trajectory trajectory(22, p.head<2>().norm(), p.z());
+                require(!trajectory.unsolvable, "Oracle fixture is unreachable");
+                if (trajectory.fly_time > t) lo = t;
+                else hi = t;
+            }
+            const auto hit = position_at((lo + hi) * 0.5);
+            const double yaw = std::atan2(hit.y(), hit.x()) + cfg["planner"]["yaw_offset"].value_or(0.0) / 57.3;
+            tools::Trajectory trajectory(22, hit.head<2>().norm(), hit.z());
+            const double pitch = -trajectory.pitch - cfg["planner"]["pitch_offset"].value_or(0.0) / 57.3;
+            const auto plan = planner.plan(target, 22);
+            const double yaw_error = std::abs(tools::limit_rad(plan.target_yaw - yaw));
+            std::cout << "intercept yaw error: " << yaw_error * 180 / CV_PI << " deg\n";
+            require(plan.control && yaw_error < 1e-5 && std::abs(plan.target_pitch - pitch) < 1e-5,
+                    "Moving intercept does not match the independent flight-time root");
+            state[5] = 1; state[7] = 7;
+            for (double dt : {-0.5, 0., 0.1, 0.5}) {
+                auto predicted = target;
+                predicted.predict(dt);
+                const auto reference = predicted.armor_xyza_list();
+                const auto projected = target.armor_xyza_list(dt);
+                for (std::size_t i = 0; i < reference.size(); ++i) {
+                    require((reference[i] - projected[i]).norm() < 1e-12,
+                            "Lightweight interception kinematics differ from EKF prediction");
+                }
+            }
         } else if (scenario == "planner_expiry") {
             Planner planner(config);
             std::optional<Target> target = world_target(t0);
@@ -123,6 +232,53 @@ int main(int argc, char** argv) {
             try { solver.set_R_gimbal2world(Eigen::Quaterniond(0, 0, 0, 0)); }
             catch (const std::invalid_argument&) { threw = true; }
             require(threw, "Zero quaternion was accepted");
+        } else if (scenario == "tilted_keypoints") {
+            auto cfg = toml::parse_file(config);
+            auto& camera = *cfg["camera"].as_table();
+            camera.insert_or_assign("R_camera2gimbal", toml::array{1.,0.,0.,0.,1.,0.,0.,0.,1.});
+            camera.insert_or_assign("t_camera2gimbal", toml::array{0.,0.,0.});
+            camera.insert_or_assign("camera_matrix", toml::array{800.,0.,640.,0.,800.,480.,0.,0.,1.});
+            camera.insert_or_assign("distort_coeffs", toml::array{0.,0.,0.,0.,0.});
+            const auto path = std::filesystem::temp_directory_path() /
+                ("robocore-corners-" + std::to_string(t0.time_since_epoch().count()) + ".toml");
+            std::ofstream(path) << cfg;
+            Solver solver(path.string());
+            std::filesystem::remove(path);
+            const cv::Mat K = (cv::Mat_<double>(3,3) << 800,0,640,0,800,480,0,0,1);
+            const Eigen::Matrix3d base{{0,-1,0},{0,0,-1},{1,0,0}};
+            for (auto type : {ArmorType::big, ArmorType::small}) {
+                const float width = type == ArmorType::big ? 0.230f : 0.135f;
+                const std::vector<cv::Point3f> object{{0,width/2,0.028f},{0,-width/2,0.028f},
+                                                     {0,-width/2,-0.028f},{0,width/2,-0.028f}};
+                for (double roll : {20.,-20.,45.,-45.,70.,-70.,0.}) {
+                    for (double slant : {0., 35.}) {
+                    const Eigen::Matrix3d R = Eigen::AngleAxisd(roll * CV_PI/180, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+                        Eigen::AngleAxisd(slant * CV_PI/180, Eigen::Vector3d::UnitY()).toRotationMatrix() * base;
+                    cv::Mat rotation, rvec;
+                    cv::eigen2cv(R, rotation); cv::Rodrigues(rotation, rvec);
+                    std::vector<cv::Point2f> expected;
+                    cv::projectPoints(object, rvec, cv::Vec3d(0.1,-0.1,3), K, cv::Mat(), expected);
+                    std::array<int,4> indices{0,1,2,3};
+                    do {
+                        auto corners = expected;
+                        for (int i=0;i<4;++i) corners[i] = expected[indices[i]];
+                        require(sort_armor_keypoints(corners), "Valid tilted corners rejected");
+                        Armor armor(1, 1, {}, corners);
+                        armor.type = type; armor.name = ArmorName::one;
+                        require(solver.solve(armor), "Tilted armor PnP failed");
+
+                        require((armor.xyz_in_world - Eigen::Vector3d(0.1,-0.1,3)).norm() < 1e-3,
+                                "Tilted corner ordering changed the recovered position");
+                        for (int i=0;i<4;++i) require(cv::norm(corners[i]-expected[i]) < 1e-4,
+                                                    "Physical corner correspondence was permuted");
+                    } while (std::next_permutation(indices.begin(),indices.end()));
+                    }
+                }
+            }
+            std::vector<cv::Point2f> invalid{{0,0},{1,0},{2,0},{3,0}};
+            require(!sort_armor_keypoints(invalid), "Collinear corners were accepted");
+            invalid = {{0,0},{1,0},{1,1},{std::numeric_limits<float>::quiet_NaN(),1}};
+            require(!sort_armor_keypoints(invalid), "Nonfinite corners were accepted");
         } else if (scenario == "calibration_validation") {
             const auto path = std::filesystem::temp_directory_path() /
                               ("robocore-calibration-" + std::to_string(t0.time_since_epoch().count()) + ".toml");

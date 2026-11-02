@@ -56,11 +56,14 @@ public:
     static_assert(std::is_trivially_copyable_v<T>, "Serial packets must be trivially copyable");
     static_assert(sizeof(T) >= 2 && sizeof(T) <= N, "Packet must fit the parser buffer");
 
-    StructParser() {
+    explicit StructParser(std::function<bool(const T&)> validate = [](const T&) { return true; })
+        : validate_(std::move(validate)) {
         T dummy{};
 
         std::memcpy(head_, &dummy, HEAD_SIZE);
     }
+
+    void reset() { buffer_ = RingBuffer<N>{}; }
 
     bool input(uint8_t byte, T& out) {
         buffer_.push(byte);
@@ -83,6 +86,11 @@ public:
 
             std::memcpy(&out, temp, sizeof(T));
 
+            if (!validate_(out)) {
+                // Keep the suffix: a valid frame can start inside this false candidate.
+                buffer_.pop(1);
+                continue;
+            }
             buffer_.pop(sizeof(T));
             return true;
         }
@@ -100,6 +108,7 @@ private:
     }
 
 private:
+    std::function<bool(const T&)> validate_;
     RingBuffer<N> buffer_;
     uint8_t head_[HEAD_SIZE];
 };
@@ -122,7 +131,8 @@ public:
     }
 
     template<typename T>
-    void recv(std::function<void(const T&)> cb) {
+    void recv(std::function<void(const T&)> cb,
+              std::function<bool(const T&)> validate = [](const T&) { return true; }) {
         struct Receiver {
             StructParser<T> parser;
             uint64_t session = 0;
@@ -130,10 +140,11 @@ public:
         };
         auto receiver = std::make_shared<Receiver>();
         receiver->callback = std::move(cb);
+        receiver->parser = StructParser<T>{std::move(validate)};
         auto wrapper = [this, receiver](
                            const uint8_t* data, size_t len, uint64_t session) {
             if (receiver->session != session) {
-                receiver->parser = StructParser<T>{};
+                receiver->parser.reset();
                 receiver->session = session;
             }
             for (size_t i = 0; i < len; i++) {

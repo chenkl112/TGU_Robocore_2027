@@ -20,6 +20,10 @@ Gimbal::Gimbal(const std::string& config_path) {
     const int timeout_ms = config["gimbal"]["feedback_timeout_ms"].value_or(100);
     if (timeout_ms <= 0) throw std::runtime_error("gimbal.feedback_timeout_ms must be positive");
     feedback_timeout_ = std::chrono::milliseconds(timeout_ms);
+    fire_thresh_ = config["planner"]["fire_thresh"].value_or(0.05);
+    if (!std::isfinite(fire_thresh_) || fire_thresh_ < 0) {
+        throw std::runtime_error("planner.fire_thresh must be finite and nonnegative");
+    }
 
     if (!serial_.open(com_port, baudrate)) {
         LOG_ERROR(MODULE, "[Gimbal] Failed to open serial: {}", com_port);
@@ -121,6 +125,10 @@ void Gimbal::send(
     control = control && finite && feedback_fresh_locked() && mode_ == GimbalMode::AUTO_AIM &&
               (!expected_session || *expected_session == session_);
     VisionToGimbal packet{};
+    // Recheck actual alignment under the same lock as the latest feedback.
+    // Planner also checks the interception reference; neither check alone permits fire.
+    const double yaw_error = std::remainder(static_cast<double>(yaw) - state_.yaw, 2 * std::acos(-1.0));
+    fire = fire && std::hypot(yaw_error, static_cast<double>(pitch) - state_.pitch) < fire_thresh_;
     packet.mode = control ? (fire ? 2 : 1) : 0;
     if (control) {
         packet.yaw = yaw;
@@ -139,11 +147,6 @@ void Gimbal::read_thread() {
     LOG_INFO(MODULE, "[Gimbal] read_thread started.");
 
     serial_.recv<GimbalToVision>([this](const GimbalToVision& pkt) {
-        if (!tools::check_crc16(
-                reinterpret_cast<const uint8_t*>(&pkt), sizeof(GimbalToVision))) {
-            return;
-        }
-
         auto t = std::chrono::steady_clock::now();
         Eigen::Quaterniond q(pkt.q[0], pkt.q[1], pkt.q[2], pkt.q[3]);
         if (!std::isfinite(q.norm()) || q.norm() < 1e-6) {
@@ -161,6 +164,7 @@ void Gimbal::read_thread() {
         const auto previous_mode = mode_;
         const bool resumed = !first_packet_received_ || t - last_packet_ > feedback_timeout_;
         last_packet_ = t;
+        state_.received_at = t;
         state_.yaw = pkt.yaw;
         state_.yaw_vel = pkt.yaw_vel;
         state_.pitch = pkt.pitch;
@@ -181,6 +185,8 @@ void Gimbal::read_thread() {
             ++session_;
             session_started_ = t;
         }
+    }, [](const GimbalToVision& pkt) {
+        return tools::check_crc16(reinterpret_cast<const uint8_t*>(&pkt), sizeof(pkt));
     });
 
     while (!quit_ && serial_.is_open()) {

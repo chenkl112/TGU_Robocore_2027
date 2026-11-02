@@ -48,12 +48,12 @@ foreach(target io_test_support serial_tests gimbal_lifecycle_tests)
     target_link_options(${target} PRIVATE ${IO_SANITIZER_FLAGS})
 endforeach()
 
-foreach(scenario IN ITEMS read_timeout close_read fragmented subscriptions isolated_ports
+foreach(scenario IN ITEMS read_timeout close_read fragmented subscriptions false_header isolated_ports
         reopen failed_open disconnect write_timeout close_write queued_write callback_close callback_throw concurrent)
     add_test(NAME serial.${scenario} COMMAND serial_tests ${scenario})
     set_tests_properties(serial.${scenario} PROPERTIES TIMEOUT 15)
 endforeach()
-foreach(scenario IN ITEMS silent_start idle_shutdown feedback_timeout pose_history mode_session)
+foreach(scenario IN ITEMS silent_start idle_shutdown feedback_timeout pose_history mode_session feedback_alignment)
     add_test(NAME gimbal.${scenario} COMMAND gimbal_lifecycle_tests ${scenario})
     set_tests_properties(gimbal.${scenario} PROPERTIES TIMEOUT 10)
 endforeach()

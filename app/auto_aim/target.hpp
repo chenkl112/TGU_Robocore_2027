@@ -31,11 +31,13 @@ public:
     void predict(std::chrono::steady_clock::time_point t);
     void predict(double dt);
     auto timestamp() const { return t_; }
+    // Time of the last accepted measurement, unaffected by prediction.
+    auto observation_timestamp() const { return last_observation_; }
     bool update(const Armor& armor, double max_match_distance = 0.5);
 
     Eigen::VectorXd ekf_x() const;
     const tools::ExtendedKalmanFilter& ekf() const;
-    std::vector<Eigen::Vector4d> armor_xyza_list() const;
+    std::vector<Eigen::Vector4d> armor_xyza_list(double dt = 0.0) const;
 
     bool diverged() const;
     bool convergened();
@@ -51,6 +53,7 @@ private:
 
     tools::ExtendedKalmanFilter ekf_;
     std::chrono::steady_clock::time_point t_;
+    std::chrono::steady_clock::time_point last_observation_{};
 
     void update_ypda(const Armor& armor, int id);
     Eigen::Vector3d h_armor_xyz(const Eigen::VectorXd& x, int id) const;
