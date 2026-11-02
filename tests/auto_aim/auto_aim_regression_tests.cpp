@@ -1,6 +1,7 @@
 #include "app/auto_aim/planner/planner.hpp"
 #include "app/auto_aim/solver.hpp"
 #include "app/auto_aim/tracker.hpp"
+#include "app/auto_aim/yolos/keypoints.hpp"
 #include "io/usbcamera/usbcamera.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
@@ -8,7 +9,6 @@
 #include "tools/tomlpp.hpp"
 
 #include <chrono>
-#include <array>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -232,7 +232,7 @@ int main(int argc, char** argv) {
             try { solver.set_R_gimbal2world(Eigen::Quaterniond(0, 0, 0, 0)); }
             catch (const std::invalid_argument&) { threw = true; }
             require(threw, "Zero quaternion was accepted");
-        } else if (scenario == "tilted_keypoints") {
+        } else if (scenario == "tilted_keypoints" || scenario == "perspective_keypoints") {
             auto cfg = toml::parse_file(config);
             auto& camera = *cfg["camera"].as_table();
             camera.insert_or_assign("R_camera2gimbal", toml::array{1.,0.,0.,0.,1.,0.,0.,0.,1.});
@@ -251,34 +251,35 @@ int main(int argc, char** argv) {
                 const std::vector<cv::Point3f> object{{0,width/2,0.028f},{0,-width/2,0.028f},
                                                      {0,-width/2,-0.028f},{0,width/2,-0.028f}};
                 for (double roll : {20.,-20.,45.,-45.,70.,-70.,0.}) {
-                    for (double slant : {0., 35.}) {
-                    const Eigen::Matrix3d R = Eigen::AngleAxisd(roll * CV_PI/180, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
-                        Eigen::AngleAxisd(slant * CV_PI/180, Eigen::Vector3d::UnitY()).toRotationMatrix() * base;
-                    cv::Mat rotation, rvec;
-                    cv::eigen2cv(R, rotation); cv::Rodrigues(rotation, rvec);
-                    std::vector<cv::Point2f> expected;
-                    cv::projectPoints(object, rvec, cv::Vec3d(0.1,-0.1,3), K, cv::Mat(), expected);
-                    std::array<int,4> indices{0,1,2,3};
-                    do {
-                        auto corners = expected;
-                        for (int i=0;i<4;++i) corners[i] = expected[indices[i]];
-                        require(sort_armor_keypoints(corners), "Valid tilted corners rejected");
+                    for (double slant : (scenario == "perspective_keypoints" ? std::vector<double>{70., 80.} : std::vector<double>{0., 35.})) {
+                        const Eigen::Matrix3d R = Eigen::AngleAxisd(roll * CV_PI/180, Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+                            Eigen::AngleAxisd(slant * CV_PI/180, Eigen::Vector3d::UnitY()).toRotationMatrix() * base;
+                        cv::Mat rotation, rvec;
+                        cv::eigen2cv(R, rotation); cv::Rodrigues(rotation, rvec);
+                        std::vector<cv::Point2f> expected;
+                        cv::projectPoints(object, rvec, cv::Vec3d(0.1,-0.1,3), K, cv::Mat(), expected);
+                        // Model channels are LT, LB, RB, RT, regardless of image dimensions.
+                        std::vector<cv::Point2f> corners{expected[0], expected[3], expected[2], expected[1]};
+                        require(decode_yolov8_keypoints(corners), "Valid model keypoints rejected");
                         Armor armor(1, 1, {}, corners);
                         armor.type = type; armor.name = ArmorName::one;
                         require(solver.solve(armor), "Tilted armor PnP failed");
-
+                        if (scenario == "perspective_keypoints" && roll == 20.) {
+                            std::cout << "type=" << type << " slant=" << slant << " depth=" << armor.xyz_in_world.z() << '\n';
+                        }
                         require((armor.xyz_in_world - Eigen::Vector3d(0.1,-0.1,3)).norm() < 1e-3,
-                                "Tilted corner ordering changed the recovered position");
-                        for (int i=0;i<4;++i) require(cv::norm(corners[i]-expected[i]) < 1e-4,
-                                                    "Physical corner correspondence was permuted");
-                    } while (std::next_permutation(indices.begin(),indices.end()));
+                                "Model keypoint mapping changed the recovered position");
+                        for (int i = 0; i < 4; ++i) {
+                            require(cv::norm(corners[i] - expected[i]) < 1e-4,
+                                    "Physical corner correspondence was permuted");
+                        }
                     }
                 }
             }
             std::vector<cv::Point2f> invalid{{0,0},{1,0},{2,0},{3,0}};
-            require(!sort_armor_keypoints(invalid), "Collinear corners were accepted");
+            require(!decode_yolov8_keypoints(invalid), "Collinear corners were accepted");
             invalid = {{0,0},{1,0},{1,1},{std::numeric_limits<float>::quiet_NaN(),1}};
-            require(!sort_armor_keypoints(invalid), "Nonfinite corners were accepted");
+            require(!decode_yolov8_keypoints(invalid), "Nonfinite corners were accepted");
         } else if (scenario == "calibration_validation") {
             const auto path = std::filesystem::temp_directory_path() /
                               ("robocore-calibration-" + std::to_string(t0.time_since_epoch().count()) + ".toml");

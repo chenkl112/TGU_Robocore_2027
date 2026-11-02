@@ -1,4 +1,5 @@
 #include "yolov8.hpp"
+#include "keypoints.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -173,7 +174,7 @@ std::list<Armor> YOLOV8::parse(
 
     std::list<Armor> armors;
     for (const auto& i : indices) {
-        if (!sort_armor_keypoints(armors_key_points[i])) continue;
+        if (!decode_yolov8_keypoints(armors_key_points[i])) continue;
         if (use_roi_) {
             armors.emplace_back(
                 ids[i], confidences[i], boxes[i], armors_key_points[i], offset_);

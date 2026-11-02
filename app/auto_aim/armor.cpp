@@ -1,34 +1,11 @@
 #include "armor.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 
 #include <opencv2/opencv.hpp>
 
 namespace app::auto_aim {
-
-bool sort_armor_keypoints(std::vector<cv::Point2f>& keypoints) {
-    if (keypoints.size() != 4) return false;
-    for (const auto& p : keypoints) {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y)) return false;
-    }
-    std::vector<cv::Point2f> hull;
-    cv::convexHull(keypoints, hull);
-    if (hull.size() != 4 || std::abs(cv::contourArea(hull)) < 1.0) return false;
-
-    // The two short, opposite edges are the lightbars. Sorting the four points
-    // by image y instead pairs the two endpoints of one bar when armor rolls.
-    const auto length = [&](int i) { return cv::norm(hull[i] - hull[(i + 1) % 4]); };
-    const int first = length(0) + length(2) < length(1) + length(3) ? 0 : 1;
-    std::array<cv::Point2f, 2> left{hull[first], hull[(first + 1) % 4]};
-    std::array<cv::Point2f, 2> right{hull[(first + 2) % 4], hull[(first + 3) % 4]};
-    if (left[0].x + left[1].x > right[0].x + right[1].x) std::swap(left, right);
-    if (left[0].y > left[1].y) std::swap(left[0], left[1]);
-    if (right[0].y > right[1].y) std::swap(right[0], right[1]);
-    keypoints = {left[0], right[0], right[1], left[1]};
-    return true;
-}
 
 Lightbar::Lightbar(const cv::RotatedRect& rotated_rect, std::size_t id)
     : id(id), rotated_rect(rotated_rect) {

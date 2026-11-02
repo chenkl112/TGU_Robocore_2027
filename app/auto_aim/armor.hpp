@@ -80,10 +80,6 @@ static_assert(
 static_assert(
     armor_priority(ArmorName::two, PriorityMode::mode_two) == ArmorPriority::first);
 
-// Orders a convex armor silhouette via its opposite lightbar edges.
-// Returns corners as left-top, right-top, right-bottom, left-bottom.
-bool sort_armor_keypoints(std::vector<cv::Point2f>& points);
-
 struct Lightbar {
     std::size_t id;
     Color color = Color::blue;

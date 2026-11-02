@@ -53,6 +53,13 @@ of the last accepted measurement; prediction, empty frames and rejected measurem
 not refresh it. The live entry point and Planner enforce `planner.max_target_age` using
 that measurement time. Every MPC sample solves its own ballistic interception time.
 
-The YOLO corner adapter identifies the two opposite lightbar edges of a convex armor
-silhouette before arranging corners for PnP. The regression suite covers visible armor
-at roll angles up to ±70 degrees; fully side-on or occluded armor needs further data.
+The bundled YOLOv8 pose head emits semantic keypoints in `LT, LB, RB, RT` order.
+The decoder maps channels to PnP's `LT, RT, RB, LB` order and preserves their
+identities under roll and perspective. It checks finiteness and convexity without
+sorting image coordinates or edge lengths. A replacement model must use the same
+semantic channel contract, checked by `auto_aim.model_keypoint_contract` using the
+bundled weights and generated armor images.
+
+Projection regressions cover small and big armor at 3 m, roll angles 0/±20/±45/±70
+degrees, and view angles 0/35/70/80 degrees. OpenCV IPPE results that are nonfinite
+or behind the camera are retried with the iterative PnP solver using the same points.

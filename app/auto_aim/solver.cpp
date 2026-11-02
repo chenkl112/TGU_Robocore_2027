@@ -116,15 +116,20 @@ bool Solver::solve(Armor& armor) const {
     if (std::abs(cv::contourArea(armor.points)) < 1.0) return false;
     cv::Vec3d rvec, tvec;
     bool solved = false;
-    try {
-        solved = cv::solvePnP(
-        object_points, armor.points, camera_matrix_, distort_coeffs_, rvec, tvec, false,
-        cv::SOLVEPNP_IPPE);
-    } catch (const cv::Exception&) {
-        return false;
+    for (const auto method : {cv::SOLVEPNP_IPPE, cv::SOLVEPNP_ITERATIVE}) {
+        try {
+            solved = cv::solvePnP(object_points, armor.points, camera_matrix_, distort_coeffs_,
+                                  rvec, tvec, false, method);
+        } catch (const cv::Exception&) {
+            solved = false;
+        }
+        if (solved && cv::checkRange(rvec) && cv::checkRange(tvec) && tvec[2] > 0) break;
+        // OpenCV IPPE can report success with NaNs for valid planar poses.
+        // Retry the same physical correspondences with its iterative solver.
+        solved = false;
     }
-    if (!solved || !cv::checkRange(rvec) || !cv::checkRange(tvec) || tvec[2] <= 0) {
-        LOG_WARN(MODULE, "PnP failed or returned non-positive depth");
+    if (!solved) {
+        LOG_WARN(MODULE, "PnP failed or returned nonfinite/non-positive depth");
         return false;
     }
 
