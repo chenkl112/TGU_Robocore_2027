@@ -39,10 +39,14 @@ distort_coeffs = [
 ]
 
 [solver]
-# RMS corner reprojection errors in original-image pixels, before yaw optimization.
+# RMS corner reprojection errors in original-image pixels.
 max_reprojection_error = 3.0
 # Smaller differences leave infantry size unresolved unless a spatially matched track exists.
 min_type_error_gap = 0.25
+# Two size hypotheses within this corner-noise level remain ambiguous.
+size_noise_floor = 1.5
+# Balance infantry may pitch; degrees relative to the gravity-aligned world frame.
+max_balance_pitch = 60.0
 
 [detector]
 threshold = 150.0
@@ -97,7 +101,7 @@ auto_fire = false
 [planner]
 # Maximum age of the last accepted observation; prediction/empty frames do not refresh it.
 max_target_age = 0.1
-# 参数移植自 sp_vision_25 standard_mpc，偏移和延迟仍需实车标定。
+# 基于 sp_vision_25 standard_mpc；偏移、延迟和代价仍需实车整定。
 yaw_offset = -0.8
 pitch_offset = -1.0
 # Radians: both MPC tracking error and actual yaw/pitch alignment must pass.
@@ -107,10 +111,11 @@ high_speed_delay_time = 0.026
 low_speed_delay_time = 0.010
 max_yaw_acc = 50.0
 Q_yaw = [9.0e6, 0.0]
-R_yaw = [1.0]
+# Acceleration cost smooths plate handoffs within the bounded solver budget.
+R_yaw = [30.0]
 max_pitch_acc = 100.0
 Q_pitch = [9.0e6, 0.0]
-R_pitch = [1.0]
+R_pitch = [30.0]
 # 上车完成协议、坐标系、MPC 输出与标定验证前必须保持关闭。
 auto_fire = false
 

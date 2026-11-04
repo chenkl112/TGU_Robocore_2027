@@ -1,12 +1,16 @@
 #include "app/auto_aim/solver.hpp"
 #include "app/auto_aim/tracker.hpp"
 #include "tools/logger.hpp"
+#include "tools/math_tools.hpp"
 #include "tools/tomlpp.hpp"
 
 #include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <list>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -80,7 +84,10 @@ void first_observation(Solver& solver, Color color) {
 
 void ambiguity_and_prior(Solver& solver, Color color) {
     const Eigen::Vector3d far_position{10, 0, 0};
-    const double yaw = 45.0 * CV_PI / 180.0;
+    // With gravity-aware hypotheses, a large plate at 45 degrees can still
+    // exclude the small mounting geometry. At 70 degrees both sizes really
+    // are indistinguishable within the configured source-pixel noise floor.
+    const double yaw = 70.0 * CV_PI / 180.0;
     auto initial = observation(solver, ArmorName::three, ArmorType::big,
                                far_position, yaw, color);
     require(!solver.solve_observation(initial),
@@ -98,13 +105,185 @@ void ambiguity_and_prior(Solver& solver, Color color) {
     // resolve ambiguity, but cannot override a clearly different physical size.
     for (auto physical_type : {ArmorType::big, ArmorType::small}) {
         const auto wrong_prior = physical_type == ArmorType::big ? ArmorType::small : ArmorType::big;
-        auto clear = observation(solver, ArmorName::four, physical_type, {1, 0, 0}, yaw, color);
+        auto clear = observation(solver, ArmorName::four, physical_type, {1, 0, 0}, CV_PI / 4, color);
         require(solver.solve_observation(clear, wrong_prior),
                 "Clear opposite-size observation was rejected solely because of its prior");
         require(clear.type == physical_type,
                 "Tracked prior overrode clear evidence for the opposite armor size");
         require((clear.xyz_in_world - Eigen::Vector3d(1, 0, 0)).norm() < 0.01,
                 "Clear opposite-size observation retained the prior's incorrect depth");
+    }
+}
+
+void corner_noise(Armor& armor, int mask, float amplitude = 1.0f) {
+    for (int coordinate = 0; coordinate < 8; ++coordinate) {
+        const float delta = ((mask >> coordinate) & 1) ? amplitude : -amplitude;
+        if (coordinate % 2) armor.points[coordinate / 2].y += delta;
+        else armor.points[coordinate / 2].x += delta;
+    }
+}
+
+void noisy_size_hypotheses(Solver& solver, Color color) {
+    int accepted = 0, ambiguous = 0;
+    for (double distance : {1., 3., 5.}) {
+        for (auto type : {ArmorType::big, ArmorType::small}) {
+            int near_accepted = 0;
+            for (double degrees : {0., 45., 70.}) {
+                for (int mask = 0; mask < 256; ++mask) {
+                    const Eigen::Vector3d position{distance, 0, 0};
+                    auto noisy = observation(solver, ArmorName::three, type, position,
+                                             degrees * CV_PI / 180.0, color);
+                    corner_noise(noisy, mask);
+                    auto tracked = noisy;
+                    const auto context = " at distance=" + std::to_string(distance) +
+                        " yaw=" + std::to_string(degrees) + " mask=" + std::to_string(mask);
+                    if (solver.solve_observation(noisy)) {
+                        require(noisy.type == type, "Noisy corners selected the wrong size" + context);
+                        require((noisy.xyz_in_world - position).norm() < 0.6,
+                                "Noisy corners caused a large range error" + context);
+                        ++accepted;
+                        ++near_accepted;
+                    } else {
+                        ++ambiguous;
+                    }
+                    require(solver.solve_observation(tracked, type) && tracked.type == type,
+                            "Correct tracked size failed on a noisy observation" + context);
+                }
+            }
+            // Both vehicle sizes must remain acquirable at ordinary range;
+            // merely rejecting every noisy image does not fix initialization.
+            if (distance <= 3) require(near_accepted >= 256,
+                "Noise policy prevented ordinary-range infantry acquisition");
+        }
+    }
+    std::cout << "corner-noise sweep: accepted=" << accepted << " ambiguous=" << ambiguous
+              << ", no incorrect size and all correct-prior updates accepted\n";
+}
+
+void noisy_acquisition_recovery(const std::string& config, Solver& solver,
+                                Color color, int confirmations) {
+    Tracker tracker(config, solver);
+    const auto t0 = Clock::now();
+    const Eigen::Vector3d position{3, 0, 0};
+    for (int frame = 0; frame < confirmations + 12; ++frame) {
+        auto armor = observation(solver, ArmorName::three, ArmorType::big, position, 0, color);
+        if (frame < confirmations + 3) corner_noise(armor, 17);
+        if (frame == 0) {
+            auto first = armor;
+            require(solver.solve_observation(first) && first.type == ArmorType::big,
+                    "The review's mask17 fixture did not acquire the correct large size");
+            require((first.xyz_in_world - position).norm() < 0.1,
+                    "The review's mask17 fixture retained metre-scale range error");
+        }
+        const auto stamp = t0 + frame * 10ms;
+        std::list<Armor> armors{std::move(armor)};
+        const auto targets = tracker.track(armors, stamp);
+        if (frame < confirmations - 1) continue;
+        require(targets.size() == 1 && targets.front().observed &&
+                    targets.front().observation_timestamp() == stamp,
+                "Clean observations could not update the track acquired from noisy corners");
+        require(targets.front().armor_type == ArmorType::big &&
+                    targets.front().armor_xyza_list().size() == 2,
+                "Noisy initialization poisoned the balanced-infantry model");
+    }
+}
+
+Armor pitched_observation(Solver& solver, ArmorType physical_type,
+                          const Eigen::Vector3d& position, double yaw, double pitch,
+                          double roll, Color color) {
+    const auto rotation = tools::rotation_matrix({yaw, pitch, roll});
+    const float width = physical_type == ArmorType::big ? 0.230f : 0.135f;
+    const std::vector<Eigen::Vector3d> object{
+        {0, width / 2, 0.028}, {0, -width / 2, 0.028},
+        {0, -width / 2, -0.028}, {0, width / 2, -0.028}};
+    std::vector<cv::Point3f> world_points;
+    for (const auto& point : object) {
+        const Eigen::Vector3d world = position + rotation * point;
+        world_points.emplace_back(world.x(), world.y(), world.z());
+    }
+    Armor result(1, 1, {}, solver.world2pixel(world_points));
+    result.name = ArmorName::three;
+    result.type = ArmorType::unknown;
+    result.color = color;
+    return result;
+}
+
+void balance_pitch_and_gravity(Solver& solver, Color color) {
+    for (const auto& orientation : {Eigen::Quaterniond::Identity(), Eigen::Quaterniond(
+        Eigen::AngleAxisd(170 * CV_PI / 180, Eigen::Vector3d::UnitZ()) *
+        Eigen::AngleAxisd(12 * CV_PI / 180, Eigen::Vector3d::UnitY()) *
+        Eigen::AngleAxisd(-25 * CV_PI / 180, Eigen::Vector3d::UnitX()))}) {
+        solver.set_R_gimbal2world(orientation);
+        const Eigen::Vector3d position = solver.R_gimbal2world() * Eigen::Vector3d(3, 0, 0);
+        const double bearing = std::atan2(position.y(), position.x());
+        for (double pitch : {-60., -30., -10., 0., 15., 30., 45., 60.}) {
+            auto armor = pitched_observation(solver, ArmorType::big, position, bearing,
+                                             pitch * CV_PI / 180, 0, color);
+            corner_noise(armor, 17, 0.5f);
+            require(solver.solve_observation(armor, ArmorType::big) && armor.type == ArmorType::big,
+                    "Gravity-aware classification rejected a dynamically pitched balance plate");
+            require((armor.xyz_in_world - position).norm() < 0.1,
+                    "Balancing pitch or camera roll biased the estimated range");
+        }
+        for (auto type : {ArmorType::big, ArmorType::small}) {
+            auto armor = pitched_observation(solver, type, position, bearing, CV_PI / 12, 0, color);
+            corner_noise(armor, 17);
+            require(solver.solve_observation(armor) && armor.type == type,
+                    "Camera attitude changed an ordinary-range size decision");
+        }
+    }
+    solver.set_R_gimbal2world(Eigen::Quaterniond::Identity());
+}
+
+void mounting_model_mismatch(Solver& solver, Color color) {
+    int acquired = 0, uncertain = 0;
+    for (double distance : {1., 3., 5.}) {
+        for (double degrees : {0., 45., 70.}) {
+            for (auto type : {ArmorType::big, ArmorType::small}) {
+                for (const auto& [pitch, roll] : std::vector<std::pair<double, double>>{
+                    {15, -5}, {15, 5}, {0, 0}, {30, 0}}) {
+                    for (int mask = 0; mask < 256; ++mask) {
+                        const Eigen::Vector3d position{distance, 0, 0};
+                        auto armor = pitched_observation(solver, type, position, degrees * CV_PI / 180,
+                            pitch * CV_PI / 180, roll * CV_PI / 180, color);
+                        corner_noise(armor, mask);
+                        const auto context = " at distance=" + std::to_string(distance) +
+                            " type=" + std::to_string(type) + " yaw=" + std::to_string(degrees) +
+                            " pitch=" + std::to_string(pitch) + " roll=" + std::to_string(roll) +
+                            " mask=" + std::to_string(mask);
+                        if (!solver.solve_observation(armor)) {
+                            ++uncertain;
+                            continue;
+                        }
+                        ++acquired;
+                        require(armor.type == type,
+                                "Chassis tilt was mistaken for a different armor size" + context);
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "mounting-model perturbations: accepted=" << acquired
+              << " uncertain=" << uncertain << ", no incorrect size\n";
+}
+
+void size_configuration(const std::string& config) {
+    const auto original = toml::parse_file(config);
+    const auto path = std::filesystem::temp_directory_path() /
+        ("robocore-size-config-" + std::to_string(Clock::now().time_since_epoch().count()) + ".toml");
+    for (const auto& [key, value] : std::vector<std::pair<std::string, double>>{
+        {"size_noise_floor", 0}, {"size_noise_floor", -1}, {"size_noise_floor", 4},
+        {"size_noise_floor", std::numeric_limits<double>::infinity()},
+        {"max_balance_pitch", 0}, {"max_balance_pitch", 90},
+        {"max_balance_pitch", std::numeric_limits<double>::quiet_NaN()}}) {
+        auto invalid = original;
+        invalid["solver"].as_table()->insert_or_assign(key, value);
+        std::ofstream(path) << invalid;
+        bool rejected = false;
+        try { Solver solver(path.string()); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        std::filesystem::remove(path);
+        require(rejected, "Invalid physical-size solver configuration was accepted: " + key);
     }
 }
 
@@ -183,7 +362,7 @@ void ambiguous_priority(const std::string& config, Solver& solver, Color color,
         // Infantry outranks sentry in both supported priority modes. An
         // unresolved size must neither starve initial acquisition nor break it.
         std::list<Armor> armors{
-            observation(solver, ArmorName::three, ArmorType::big, {10, 0, 0}, CV_PI / 4, color),
+            observation(solver, ArmorName::three, ArmorType::big, {10, 0, 0}, 70 * CV_PI / 180, color),
             observation(solver, ArmorName::sentry, ArmorType::small, {3, 0, 0}, 0, color)};
         const auto stamp = t0 + i * 10ms;
         const auto targets = tracker.track(armors, stamp);
@@ -210,6 +389,11 @@ int main(int argc, char** argv) {
         check_name_mapping();
         first_observation(solver, color);
         ambiguity_and_prior(solver, color);
+        noisy_size_hypotheses(solver, color);
+        noisy_acquisition_recovery(config, solver, color, confirmations);
+        balance_pitch_and_gravity(solver, color);
+        mounting_model_mismatch(solver, color);
+        size_configuration(config);
         continuous_balance(config, solver, color, confirmations);
         distant_same_id(config, solver, color, confirmations);
         ambiguous_priority(config, solver, color, confirmations);

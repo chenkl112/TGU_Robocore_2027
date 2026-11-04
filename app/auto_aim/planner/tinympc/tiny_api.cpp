@@ -104,8 +104,10 @@ int tiny_setup(TinySolver** solverp,
     work->gl = tinyMatrix::Zero(nx, N);
     work->yl = tinyMatrix::Zero(nu, N-1);
 
-    work->Q = (Q + rho * tinyMatrix::Identity(nx, nx)).diagonal();
-    work->R = (R + rho * tinyMatrix::Identity(nu, nu)).diagonal();
+    // Keep the physical objective here: update_linear_cost uses these values
+    // for reference tracking. The Riccati cache adds the ADMM penalty once.
+    work->Q = Q.diagonal();
+    work->R = R.diagonal();
     work->Adyn = Adyn; // State transition matrix
     work->Bdyn = Bdyn; // Input matrix
     work->fdyn = fdyn; // Affine offset vector

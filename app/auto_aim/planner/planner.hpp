@@ -61,8 +61,15 @@ private:
     void setup_yaw_solver(const std::string& config_path);
     void setup_pitch_solver(const std::string& config_path);
 
-    Eigen::Matrix<double, 2, 1> aim(const Target& target, double bullet_speed);
-    Trajectory get_trajectory(Target& target, double yaw0, double bullet_speed);
+    struct Interception {
+        Eigen::Vector2d angles;
+        Eigen::Vector4d armor;
+        std::size_t armor_id;
+    };
+    Interception aim(const Target& target, double bullet_speed,
+                     std::optional<std::size_t> armor_id = std::nullopt, bool require_visible = true);
+    Trajectory get_trajectory(const Target& target, double yaw0, double bullet_speed,
+                              bool& fire_visible);
 };
 
 }  // namespace app::auto_aim

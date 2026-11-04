@@ -9,6 +9,7 @@
 #include "tools/math_tools.hpp"
 #include "tools/tomlpp.hpp"
 #include "tools/trajectory.hpp"
+#include "tinympc/admm.hpp"
 
 static constexpr const char* MODULE = "AUTO_AIM";
 
@@ -17,7 +18,15 @@ using namespace std::chrono_literals;
 namespace app::auto_aim {
 
 // Allow changing references to converge while keeping per-frame work bounded.
-constexpr int MAX_SOLVER_ITERATIONS = 20;
+constexpr int MAX_SOLVER_ITERATIONS = 100;
+constexpr double SOLVER_RHO = 30.0;
+constexpr int SHOOT_OFFSET = 2;
+
+namespace {
+bool facing_gimbal(const Eigen::Vector4d& armor) {
+    return armor.x() * std::cos(armor.w()) + armor.y() * std::sin(armor.w()) > 0;
+}
+}  // namespace
 
 Planner::Planner(const std::string& config_path) {
     auto config = toml::parse_file(config_path);
@@ -74,9 +83,12 @@ Plan Planner::plan(Target target, double bullet_speed, std::optional<io::GimbalS
 
     double yaw0;
     Trajectory traj;
+    bool fire_visible = false;
     try {
-        yaw0 = aim(target, bullet_speed)(0);
-        traj = get_trajectory(target, yaw0, bullet_speed);
+        const auto interception = aim(target, bullet_speed);
+        yaw0 = interception.angles(0);
+        debug_xyza = interception.armor;
+        traj = get_trajectory(target, yaw0, bullet_speed, fire_visible);
     } catch (const std::exception& e) {
         LOG_WARN(MODULE, "Unsolvable target {:.2f}", bullet_speed);
         return {false};
@@ -89,12 +101,14 @@ Plan Planner::plan(Target target, double bullet_speed, std::optional<io::GimbalS
     tiny_set_x0(yaw_solver_, x0);
 
     yaw_solver_->work->Xref = traj.block(0, 0, 2, HORIZON);
+    update_linear_cost(yaw_solver_);
     const int yaw_status = tiny_solve(yaw_solver_);
 
     x0 << traj(2, 0), traj(3, 0);
     tiny_set_x0(pitch_solver_, x0);
 
     pitch_solver_->work->Xref = traj.block(2, 0, 2, HORIZON);
+    update_linear_cost(pitch_solver_);
     const int pitch_status = tiny_solve(pitch_solver_);
     // A finite, acceleration-limited rollout can still point far from the
     // target when ADMM has not converged. Reject the entire command, while
@@ -130,18 +144,17 @@ Plan Planner::plan(Target target, double bullet_speed, std::optional<io::GimbalS
     plan.pitch_vel = pitch_x(1, HALF_HORIZON);
     plan.pitch_acc = pitch_solver_->solution->u(0, HALF_HORIZON);
 
-    auto shoot_offset_ = 2;
     const auto now = std::chrono::steady_clock::now();
     const bool aligned = feedback && feedback->received_at <= now &&
         now - feedback->received_at <= feedback_timeout_ &&
         std::isfinite(feedback->yaw) && std::isfinite(feedback->pitch) &&
         std::hypot(tools::limit_rad(plan.target_yaw - feedback->yaw),
                    plan.target_pitch - feedback->pitch) < fire_thresh_;
-    plan.fire = aligned && target.observed && yaw_status == 0 && pitch_status == 0 && std::hypot(
-                    traj(0, HALF_HORIZON + shoot_offset_)
-                        - yaw_x(0, HALF_HORIZON + shoot_offset_),
-                    traj(2, HALF_HORIZON + shoot_offset_)
-                        - pitch_x(0, HALF_HORIZON + shoot_offset_))
+    plan.fire = aligned && target.observed && fire_visible && std::hypot(
+                    traj(0, HALF_HORIZON + SHOOT_OFFSET)
+                        - yaw_x(0, HALF_HORIZON + SHOOT_OFFSET),
+                    traj(2, HALF_HORIZON + SHOOT_OFFSET)
+                        - pitch_x(0, HALF_HORIZON + SHOOT_OFFSET))
                 < fire_thresh_;
     return plan;
 }
@@ -194,7 +207,7 @@ void Planner::setup_yaw_solver(const std::string& config_path) {
     Eigen::Matrix<double, 2, 1> Q(Q_yaw.data());
     Eigen::Matrix<double, 1, 1> R(R_yaw.data());
     if (tiny_setup(
-            &yaw_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), 1.0, 2, 1,
+            &yaw_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), SOLVER_RHO, 2, 1,
             HORIZON, 0) != 0) {
         throw std::runtime_error("failed to initialize yaw MPC solver");
     }
@@ -237,7 +250,7 @@ void Planner::setup_pitch_solver(const std::string& config_path) {
     Eigen::Matrix<double, 2, 1> Q(Q_pitch.data());
     Eigen::Matrix<double, 1, 1> R(R_pitch.data());
     if (tiny_setup(
-            &pitch_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), 1.0, 2, 1,
+            &pitch_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), SOLVER_RHO, 2, 1,
             HORIZON, 0) != 0) {
         throw std::runtime_error("failed to initialize pitch MPC solver");
     }
@@ -251,13 +264,16 @@ void Planner::setup_pitch_solver(const std::string& config_path) {
     pitch_solver_->settings->max_iter = MAX_SOLVER_ITERATIONS;
 }
 
-Eigen::Matrix<double, 2, 1> Planner::aim(const Target& target, double bullet_speed) {
+Planner::Interception Planner::aim(const Target& target, double bullet_speed,
+                                   std::optional<std::size_t> armor_id, bool require_visible) {
     // Solve each physical armor separately: switching armor IDs inside the root
     // search makes flight time discontinuous when alternating plates have different z.
     const auto armors = target.armor_xyza_list();
     double best_distance = std::numeric_limits<double>::infinity();
-    Eigen::Vector2d angles;
+    bool best_facing = false;
+    Interception interception;
     for (std::size_t id = 0; id < armors.size(); ++id) {
+        if (armor_id && id != *armor_id) continue;
         Eigen::Vector4d armor;
         auto evaluate = [&](double time) {
             armor = target.armor_xyza_list(time)[id];
@@ -283,38 +299,61 @@ Eigen::Matrix<double, 2, 1> Planner::aim(const Target& target, double bullet_spe
             if (trajectory.fly_time > time) lower = time;
             else upper = time;
         }
-        if (!converged || armor.head<2>().norm() >= best_distance) continue;
+        if (!converged) continue;
+        const bool facing = facing_gimbal(armor);
+        if (!armor_id) {
+            if ((require_visible && !facing) || (best_facing && !facing)) continue;
+            if (facing == best_facing && armor.head<2>().norm() >= best_distance) continue;
+        } else if (armor.head<2>().norm() >= best_distance) continue;
         best_distance = armor.head<2>().norm();
-        debug_xyza = armor;
-        angles << tools::limit_rad(std::atan2(armor.y(), armor.x()) + yaw_offset_),
+        best_facing = facing;
+        interception.armor = armor;
+        interception.armor_id = id;
+        interception.angles << tools::limit_rad(std::atan2(armor.y(), armor.x()) + yaw_offset_),
                   -trajectory.pitch - pitch_offset_;
     }
     if (!std::isfinite(best_distance)) throw std::runtime_error("No converged interception trajectory");
-    return angles;
+    return interception;
 }
 
-Trajectory Planner::get_trajectory(Target& target, double yaw0, double bullet_speed) {
+Trajectory Planner::get_trajectory(const Target& target, double yaw0, double bullet_speed,
+                                   bool& fire_visible) {
     Trajectory traj;
-
-    target.predict(-DT * (HALF_HORIZON + 1));
-    auto yaw_pitch_last = aim(target, bullet_speed);
-
-    target.predict(DT);
-    auto yaw_pitch = aim(target, bullet_speed);
-
-    for (int i = 0; i < HORIZON; i++) {
-        target.predict(DT);
-        auto yaw_pitch_next = aim(target, bullet_speed);
-
-        auto yaw_vel = tools::limit_rad(yaw_pitch_next(0) - yaw_pitch_last(0)) / (2 * DT);
-        auto pitch_vel = (yaw_pitch_next(1) - yaw_pitch_last(1)) / (2 * DT);
-
-        traj.col(i) << tools::limit_rad(yaw_pitch(0) - yaw0), yaw_vel, yaw_pitch(1), pitch_vel;
-
-        yaw_pitch_last = yaw_pitch;
-        yaw_pitch = yaw_pitch_next;
+    auto previous = target;
+    previous.predict(-DT * (HALF_HORIZON + 1));
+    auto current = previous;
+    current.predict(DT);
+    // A two-plate target can expose neither plate in a horizon tail. Those
+    // samples still define a smoothing objective; only the actual interception
+    // and firing sample must face the gimbal. Prefer facing plates whenever one
+    // exists so the central reference agrees with the selected interception.
+    auto before = aim(previous, bullet_speed, std::nullopt, false);
+    auto interception = aim(current, bullet_speed, std::nullopt, false);
+    double last_yaw = yaw0;
+    double relative_yaw = 0;
+    for (int i = 0; i < HORIZON; ++i) {
+        auto next = current;
+        next.predict(DT);
+        const auto after = aim(next, bullet_speed, std::nullopt, false);
+        // Keep the nearest physical plate as the angle reference. Estimate its
+        // own velocity, rather than interpreting a plate handoff as instantaneous
+        // motion. Reuse adjacent roots whenever the selected plate is unchanged.
+        const auto before_angles = before.armor_id == interception.armor_id ? before.angles :
+            aim(previous, bullet_speed, interception.armor_id).angles;
+        const auto after_angles = after.armor_id == interception.armor_id ? after.angles :
+            aim(next, bullet_speed, interception.armor_id).angles;
+        const auto& angles = interception.angles;
+        relative_yaw += tools::limit_rad(angles.x() - last_yaw);
+        traj.col(i) << relative_yaw,
+                       tools::limit_rad(after_angles.x() - before_angles.x()) / (2 * DT),
+                       angles.y(), (after_angles.y() - before_angles.y()) / (2 * DT);
+        if (i == HALF_HORIZON + SHOOT_OFFSET) fire_visible = facing_gimbal(interception.armor);
+        last_yaw = angles.x();
+        previous = std::move(current);
+        current = std::move(next);
+        before = interception;
+        interception = after;
     }
-
     return traj;
 }
 

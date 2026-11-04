@@ -31,11 +31,14 @@ add_executable(auto_aim_regression_tests auto_aim_regression_tests.cpp)
 target_link_libraries(auto_aim_regression_tests PRIVATE auto_aim_regression_support)
 foreach(scenario IN ITEMS tracking_confirmation priority_switch association_gate planner_expiry
         feedback_alignment perspective_keypoints tilted_keypoints fire_without_feedback shooter_alignment observation_expiry moving_intercept planner_acceleration_bounds
-        planner_failed_solve planner_rotating_sequence planner_solve_recovery
+        planner_failed_solve planner_rotating_sequence planner_rotating_geometry planner_solve_recovery
+        planner_visible_intercept mpc_objective
         invalid_numeric lost_target_fire pose_validation calibration_validation camera_timeout trajectory)
     add_test(NAME auto_aim.${scenario} COMMAND auto_aim_regression_tests ${scenario} ${REPO}/config/auto_aim.toml)
     set_tests_properties(auto_aim.${scenario} PROPERTIES TIMEOUT 15 WORKING_DIRECTORY ${REPO})
 endforeach()
+set_tests_properties(auto_aim.planner_rotating_sequence auto_aim.planner_rotating_geometry
+    PROPERTIES TIMEOUT 30)
 
 foreach(suite IN ITEMS armor_type yaw_optimization shooter_current_command)
     add_executable(${suite}_tests ${suite}_tests.cpp)
@@ -43,6 +46,7 @@ foreach(suite IN ITEMS armor_type yaw_optimization shooter_current_command)
     add_test(NAME auto_aim.${suite} COMMAND ${suite}_tests ${REPO}/config/auto_aim.toml)
     set_tests_properties(auto_aim.${suite} PROPERTIES TIMEOUT 30 WORKING_DIRECTORY ${REPO})
 endforeach()
+set_tests_properties(auto_aim.armor_type PROPERTIES TIMEOUT 60)
 
 # These checks exercise the actual OpenVINO worker and production executables.
 if(TARGET auto_aim)

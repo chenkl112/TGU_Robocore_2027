@@ -41,8 +41,11 @@ private:
     Eigen::Matrix3d R_gimbal2world_;
     double max_reprojection_error_ = 3.0;
     double min_type_error_gap_ = 0.25;
+    double size_noise_floor_ = 1.5;
+    double max_balance_pitch_ = 60.0 * CV_PI / 180.0;
 
-    bool solve_pose(Armor& armor, double& reprojection_error) const;
+    bool solve_pose(Armor& armor, double& reprojection_error, bool refine = false) const;
+    bool solve_size_pose(Armor& armor, double& reprojection_error, bool allow_small_tilt = false) const;
     bool finish_pose(Armor& armor) const;
 
     void optimize_yaw(Armor& armor) const;

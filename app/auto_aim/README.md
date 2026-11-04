@@ -45,17 +45,33 @@ included.
 
 The detectors label infantry (3/4/5) size as `unknown`; pixel aspect ratio does
 not determine physical size. `Solver::solve_observation` fits both 135 mm and
-230 mm widths using the calibrated camera, comparing RMS corner reprojection
-errors from the complete PnP poses before yaw optimization. Fits above
-`solver.max_reprojection_error` are rejected. If their difference is below
-`solver.min_type_error_gap`, a new track waits for clearer evidence. Both thresholds
-are in original-image pixels and require tuning against recorded corner noise.
+230 mm widths using the calibrated camera and gravity-aligned world frame.
+The size hypotheses use horizontal plate edges: small infantry has a 15-degree
+mounting pitch, while balance infantry may pitch within
+`solver.max_balance_pitch` (default ±60 degrees). This prevents a small-armor
+hypothesis from explaining a frontal large armor by tilting it and moving it
+much closer to the camera.
+
+Fits above `solver.max_reprojection_error` are rejected. If both fits are within
+`solver.size_noise_floor` (default 1.5 px RMS), or their difference is below
+`solver.min_type_error_gap`, a new track waits for clearer evidence. These error
+thresholds use original-image pixels and need tuning against recorded corner
+noise. Distant or strongly oblique infantry can remain unresolved on first
+acquisition even when the detector's number classification is confident.
 
 An existing track may resolve an ambiguous size with its previous physical size,
 but the observation must still pass the 3D association gate. Clear evidence for a
 different size is not overwritten by that prior. Unknown higher-priority detections
 do not prevent acquiring or updating another valid target. `Solver::solve` remains
-the geometry interface for callers that already know the physical size.
+the unrestricted geometry interface for callers that already know the physical
+size, including tilted armor. A new size decision also requires evidence for a
+nearly horizontal plate edge; an established track can retain its size and use
+general PnP when terrain roll or pitch invalidates that assumption, subject to the same
+reprojection and spatial association gates.
+If a small plate with 0–30 degrees of pitch and unconstrained roll can explain
+the corners within the noise floor, but the normal mounting model cannot, the
+solver also leaves a new size unresolved. This extra hypothesis only vetoes an
+unsupported size decision; it does not initialize a tilted track with a guessed size.
 
 Yaw refinement searches the visible directions around the camera-to-target ray.
 It retains the original PnP yaw unless a candidate improves reprojection error.
@@ -63,11 +79,24 @@ It retains the original PnP yaw unless a candidate improves reprojection error.
 ## Fire and freshness checks
 
 `Planner::plan` enables control only when both yaw and pitch MPC solves converge.
-Each axis has a fixed budget of twenty solver iterations per frame.
+Each axis has a fixed budget of 100 solver iterations per frame.
 If either solve fails, it returns `control = false`, `fire = false` and zero control
 outputs. Solver state is retained so subsequent frames can converge and resume control.
 The offline `planner_test` allows at most ten warm-start attempts and still fails if
 none produces a converged, finite control plan.
+
+At the command time, the reference follows the nearest visible armor's ballistic interception.
+Reference velocities use that same physical armor at adjacent times, so a switch
+between plates does not become an artificial velocity impulse. TinyMPC applies
+its ADMM penalty once and refreshes the reference cost before every solve.
+The default acceleration costs `R_yaw` and `R_pitch` are 30, and the internal ADMM
+penalty is 30. These settings allow a smooth handoff within the iteration budget;
+Q/R still require tuning for the actual gimbal. During a handoff the planned
+angle can lag the newly selected plate, and firing remains gated by the physical
+interception reference and live gimbal alignment.
+Prediction-window samples with no facing plate may use a mathematical interception
+to keep planning continuous; such samples cannot enable fire. A valid facing plate
+is still required at the command time.
 
 `Planner::plan` accepts optional `io::GimbalState` feedback. Calls without feedback can
 produce a control plan but always return `fire = false`. Live feedback includes a local

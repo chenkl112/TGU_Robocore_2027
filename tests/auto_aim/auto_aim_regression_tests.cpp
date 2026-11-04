@@ -1,4 +1,5 @@
 #include "app/auto_aim/planner/planner.hpp"
+#include "app/auto_aim/planner/tinympc/admm.hpp"
 #include "app/auto_aim/aimer.hpp"
 #include "app/auto_aim/shooter.hpp"
 #include "app/auto_aim/solver.hpp"
@@ -18,6 +19,7 @@
 #include <fstream>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -39,7 +41,7 @@ Armor image_armor(Solver& solver, ArmorName name = ArmorName::three,
     armor.center_norm = {0.5, 0.5};
     return armor;
 }
-Target world_target(Clock::time_point t) {
+Target world_target(Clock::time_point t, int armor_count = 4) {
     Armor armor(0, 1.0f, {}, {{0, 0}, {1, 0}, {1, 1}, {0, 1}});
     armor.name = ArmorName::three;
     armor.type = ArmorType::small;
@@ -48,7 +50,7 @@ Target world_target(Clock::time_point t) {
     armor.ypr_in_world = {0, 0, 0};
     armor.ypd_in_world = tools::xyz2ypd(armor.xyz_in_world);
     Eigen::VectorXd covariance = Eigen::VectorXd::Ones(11);
-    Target target(armor, t, 0.2, 4, covariance);
+    Target target(armor, t, 0.2, armor_count, covariance);
     target.observed = true;
     return target;
 }
@@ -68,6 +70,128 @@ void require_stopped(const Plan& plan) {
                             plan.yaw_acc, plan.pitch, plan.pitch_vel, plan.pitch_acc};
     require(std::all_of(values.begin(), values.end(), [](float value) { return value == 0.0f; }),
             "Stopped MPC plan retained a nonzero or nonfinite command");
+}
+
+// Independent flight-time root for every physical plate. Unlike the planner's
+// expanding bracket, these short-range fixtures all fit in the fixed [0, 2] s
+// interval. This oracle checks the actual plate, not a smoothed aiming point.
+Eigen::Vector2d intercept_reference(const Target& target, const toml::table& config,
+                                    double* facing_angle = nullptr) {
+    const double delay = config["planner"]["low_speed_delay_time"].value_or(0.01);
+    double closest = std::numeric_limits<double>::infinity();
+    Eigen::Vector2d reference;
+    for (std::size_t id = 0; id < target.armor_xyza_list().size(); ++id) {
+        double lo = 0, hi = 2;
+        for (int i = 0; i < 60; ++i) {
+            const double time = (lo + hi) * 0.5;
+            const auto armor = target.armor_xyza_list(delay + time)[id];
+            const tools::Trajectory flight(22, armor.head<2>().norm(), armor.z());
+            require(!flight.unsolvable, "Interception oracle fixture is unreachable");
+            if (flight.fly_time > time) lo = time;
+            else hi = time;
+        }
+        const auto armor = target.armor_xyza_list(delay + (lo + hi) * 0.5)[id];
+        if (armor.x() * std::cos(armor.w()) + armor.y() * std::sin(armor.w()) <= 0 ||
+            armor.head<2>().norm() >= closest) continue;
+        closest = armor.head<2>().norm();
+        if (facing_angle) *facing_angle = tools::limit_rad(armor.w() - std::atan2(armor.y(), armor.x()));
+        const tools::Trajectory flight(22, closest, armor.z());
+        reference << tools::limit_rad(std::atan2(armor.y(), armor.x()) +
+                     config["planner"]["yaw_offset"].value_or(0.0) / 57.3),
+                     -flight.pitch - config["planner"]["pitch_offset"].value_or(0.0) / 57.3;
+    }
+    require(std::isfinite(closest), "Interception oracle found no facing armor");
+    return reference;
+}
+
+void rotating_sequence(const std::string& config_path, Clock::time_point start,
+                       double distance, double speed, double bearing = 0,
+                       double radius_difference = 0, double height_difference = 0) {
+    const auto config = toml::parse_file(config_path);
+    const double yaw_acc = config["planner"]["max_yaw_acc"].value_or(50.0);
+    const double pitch_acc = config["planner"]["max_pitch_acc"].value_or(100.0);
+    const double fire_thresh = config["planner"]["fire_thresh"].value_or(0.0035);
+    Planner planner(config_path);
+    int controlled = 0, longest_stop = 0, stop_run = 0, switches = 0, centered_frames = 0;
+    double largest_error = 0, largest_jump = 0, centered_error = 0, total_ms = 0, largest_ms = 0;
+    Plan previous{};
+    for (int frame = 0; frame < 300; ++frame) {
+        const auto stamp = start + frame * 10ms;
+        auto target = rotating_target(stamp, bearing + speed * frame * 0.01, speed);
+        auto& state = const_cast<tools::ExtendedKalmanFilter&>(target.ekf()).x;
+        state[0] = distance * std::cos(bearing);
+        state[2] = distance * std::sin(bearing);
+        state[9] = radius_difference;
+        state[10] = height_difference;
+        // Previous measured alignment cannot authorize a shot at a new plate.
+        io::GimbalState feedback;
+        feedback.received_at = Clock::now();
+        feedback.yaw = previous.target_yaw;
+        feedback.pitch = previous.target_pitch;
+        const auto began = Clock::now();
+        const auto plan = planner.plan(std::optional{target}, 22, stamp, feedback);
+        const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - began).count();
+        total_ms += elapsed;
+        largest_ms = std::max(largest_ms, elapsed);
+        if (!plan.control) {
+            require_stopped(plan);
+            longest_stop = std::max(longest_stop, ++stop_run);
+            previous = plan;
+            continue;
+        }
+        ++controlled;
+        stop_run = 0;
+        double facing_angle = 0;
+        const auto reference = intercept_reference(target, config, &facing_angle);
+        require(std::hypot(tools::limit_rad(plan.target_yaw - reference.x()),
+                           plan.target_pitch - reference.y()) < 1e-5,
+                "Rotating target no longer identifies the physical interception plate");
+        const double error = std::hypot(tools::limit_rad(plan.yaw - plan.target_yaw),
+                                         plan.pitch - plan.target_pitch);
+        largest_error = std::max(largest_error, error);
+        if (std::abs(facing_angle) < 0.15) {
+            ++centered_frames;
+            centered_error = std::max(centered_error, error);
+            require(error < fire_thresh, "Normal plate tracking remains inaccurate outside a handoff");
+        }
+        require(std::isfinite(error) && error < 0.25 / distance,
+                "Control angle escaped the adjacent-plate handoff region");
+        require(std::abs(plan.yaw_acc) <= yaw_acc + 1e-4 &&
+                std::abs(plan.pitch_acc) <= pitch_acc + 1e-4,
+                "Rotating sequence exceeded its acceleration bounds");
+        if (previous.control) {
+            const double yaw_step = tools::limit_rad(plan.yaw - previous.yaw);
+            const double pitch_step = plan.pitch - previous.pitch;
+            largest_jump = std::max(largest_jump, std::hypot(yaw_step, pitch_step));
+            // Check the sequence actually sent to the gimbal, not only each
+            // independently optimized horizon's acceleration field.
+            require(std::abs(yaw_step - previous.yaw_vel * DT) < yaw_acc * DT * DT + 1e-4 &&
+                    std::abs(pitch_step - previous.pitch_vel * DT) < pitch_acc * DT * DT + 1e-4,
+                    "Armor handoff introduced a discontinuous angle command");
+            require(std::abs(plan.yaw_vel - previous.yaw_vel) < yaw_acc * DT + 1e-3 &&
+                    std::abs(plan.pitch_vel - previous.pitch_vel) < pitch_acc * DT + 1e-3,
+                    "Armor handoff introduced a discontinuous velocity command");
+            if (std::hypot(tools::limit_rad(plan.target_yaw - previous.target_yaw),
+                           plan.target_pitch - previous.target_pitch) > 0.02 / distance) {
+                ++switches;
+                require(!plan.fire, "Plate switch fired using feedback aligned to the previous plate");
+            }
+        }
+        if (std::hypot(tools::limit_rad(plan.target_yaw - feedback.yaw),
+                       plan.target_pitch - feedback.pitch) >= fire_thresh) {
+            require(!plan.fire, "Smoothed control reference bypassed physical target alignment");
+        }
+        previous = plan;
+    }
+    std::cout << "distance=" << distance << " speed=" << speed << " controlled=" << controlled
+              << "/300 longest_stop=" << longest_stop << " switches=" << switches
+              << " max_error=" << largest_error << " max_command_step=" << largest_jump
+              << " centered_error=" << centered_error << " mean_ms=" << total_ms / 300
+              << " max_ms=" << largest_ms << '\n';
+    require(controlled >= 285, "Normal rotating target lost more than five percent of control frames");
+    require(longest_stop <= 5, "Normal rotating target stopped for over 50 ms");
+    require(switches > 0, "Rotating sequence never exercised a physical plate handoff");
+    require(centered_frames > 0, "Rotating sequence never checked normal plate tracking");
 }
 
 int main(int argc, char** argv) {
@@ -262,59 +386,113 @@ int main(int argc, char** argv) {
                 require(std::abs(plan.pitch_acc) <= 100.0001f, "Pitch acceleration exceeds configured bound");
             }
             require(controlled > 0, "Acceleration bounds were never checked on an active plan");
-        } else if (scenario == "planner_failed_solve") {
+        } else if (scenario == "mpc_objective") {
+            // Independently condense a scalar integrator's physical cost into
+            // a dense quadratic. Changing rho must not add it to the requested
+            // tracking/input weights. Zero terminal reference also isolates the
+            // library's terminal Hessian from its reference convention.
+            for (double rho : {0.2, 2.0, 20.0}) {
+                constexpr int horizon = 20;
+                Eigen::MatrixXd A = Eigen::MatrixXd::Constant(1, 1, 1.0);
+                Eigen::MatrixXd B = Eigen::MatrixXd::Constant(1, 1, 1.0);
+                Eigen::MatrixXd Q = Eigen::MatrixXd::Constant(1, 1, 4.0);
+                Eigen::MatrixXd R = Eigen::MatrixXd::Constant(1, 1, 2.0);
+                TinySolver* raw = nullptr;
+                require(tiny_setup(&raw, A, B, Eigen::VectorXd::Zero(1), Q, R,
+                                   rho, 1, 1, horizon, 0) == 0, "Could not set up objective fixture");
+                auto cleanup = [](TinySolver* solver) {
+                    delete solver->solution; delete solver->cache; delete solver->settings;
+                    delete solver->work; delete solver;
+                };
+                std::unique_ptr<TinySolver, decltype(cleanup)> solver(raw, cleanup);
+                tiny_set_bound_constraints(raw, Eigen::MatrixXd::Constant(1, horizon, -100),
+                    Eigen::MatrixXd::Constant(1, horizon, 100),
+                    Eigen::MatrixXd::Constant(1, horizon - 1, -100),
+                    Eigen::MatrixXd::Constant(1, horizon - 1, 100));
+                raw->settings->max_iter = 3000;
+                raw->settings->abs_pri_tol = raw->settings->abs_dua_tol = 1e-8;
+                raw->work->Uref.setConstant(0.2);
+                tiny_set_x0(raw, Eigen::VectorXd::Ones(1));
+                update_linear_cost(raw);
+                require(tiny_solve(raw) == 0, "Objective fixture did not converge");
+                Eigen::MatrixXd hessian = 2.0 * Eigen::MatrixXd::Identity(horizon - 1, horizon - 1);
+                Eigen::VectorXd gradient = Eigen::VectorXd::Constant(horizon - 1, -2.0 * 0.2);
+                for (int time = 1; time < horizon; ++time) {
+                    Eigen::VectorXd response = Eigen::VectorXd::Zero(horizon - 1);
+                    response.head(time).setConstant(1.0);
+                    // Pinf includes the terminal ADMM state penalty once.
+                    const double weight = time == horizon - 1 ? raw->cache->Pinf(0, 0) - rho : 4.0;
+                    hessian += weight * response * response.transpose();
+                    gradient += weight * response;
+                }
+                const Eigen::VectorXd expected = -hessian.ldlt().solve(gradient);
+                std::cout << "rho=" << rho << " objective error="
+                          << (raw->solution->u.transpose() - expected).cwiseAbs().maxCoeff() << '\n';
+                // The cached infinite-horizon Riccati recursion itself stops at
+                // a 1e-5 gain change; allow that numerical approximation here.
+                require((raw->solution->u.transpose() - expected).cwiseAbs().maxCoeff() < 2e-4,
+                        "ADMM penalty changed the configured physical MPC objective");
+            }
+        } else if (scenario == "planner_visible_intercept") {
             Planner planner(config);
-            // With the default 10 ms delay this crosses a nearest-armor switch
-            // in the MPC history. The old rollout returned a 107-degree error.
-            const auto target = rotating_target(t0, 1.51);
-            require_stopped(planner.plan(std::optional{target}, 22, t0));
+            auto target = world_target(t0, 2);
+            auto& state = const_cast<tools::ExtendedKalmanFilter&>(target.ekf()).x;
+            state[6] = CV_PI / 2;
+            // At this phase both opposing plates face away from their own
+            // camera rays, even though one is necessarily the closest plate.
+            require_stopped(planner.plan(target, 22));
+            state[6] = 0;
+            require(planner.plan(target, 22).control, "Facing plate failed to restore control");
+            state[6] = 0.4;
+            state[7] = 2.0;
+            // The command-time plate is visible, but the +0.5 s horizon tail
+            // crosses the side-on gap between the two opposing plates.
+            Planner rotating(config);
+            require(rotating.plan(target, 22).control,
+                    "Invisible horizon tail stopped a visible two-plate interception");
         } else if (scenario == "planner_rotating_sequence") {
-            Planner planner(config);
-            int controlled = 0, stopped = 0;
-            double largest_error = 0.0;
-            for (int i = 0; i < 200; ++i) {
-                const auto stamp = t0 + i * 10ms;
-                const auto target = rotating_target(stamp, 2.0 * i * 0.01);
-                const auto plan = planner.plan(std::optional{target}, 22, stamp);
-                if (!plan.control) {
-                    require_stopped(plan);
-                    ++stopped;
-                    continue;
-                }
-                ++controlled;
-                const double error = std::hypot(tools::limit_rad(plan.yaw - plan.target_yaw),
-                                                plan.pitch - plan.target_pitch);
-                largest_error = std::max(largest_error, error);
-                require(std::isfinite(error) && error < 5.0 * CV_PI / 180.0,
-                        "Rotating sequence sent a control angle far from the interception reference");
-                require(std::abs(plan.yaw_acc) <= 50.0001f && std::abs(plan.pitch_acc) <= 100.0001f,
-                        "Rotating sequence exceeded its acceleration bounds");
+            for (double speed : {0.5, -0.5, 2.0, -2.0}) {
+                rotating_sequence(config, t0, 1.0, speed);
             }
-            require(controlled > 0, "Rotating sequence never produced a valid control plan");
-            require(stopped > 0, "Rotating sequence did not exercise rejection of a failed solve");
-            std::cout << "controlled=" << controlled << " stopped=" << stopped
-                      << " largest angle error=" << largest_error * 180 / CV_PI << " deg\n";
-        } else if (scenario == "planner_solve_recovery") {
-            Planner planner(config);
-            require_stopped(planner.plan(std::optional{rotating_target(t0, 1.51)}, 22, t0));
-            bool recovered = false;
-            for (int i = 1; i <= 50; ++i) {
-                const auto stamp = t0 + i * 10ms;
-                const auto target = rotating_target(stamp, 0.0, 0.0);
-                const auto plan = planner.plan(std::optional{target}, 22, stamp);
-                if (!plan.control) {
-                    require_stopped(plan);
-                    continue;
+        } else if (scenario == "planner_rotating_geometry") {
+            for (double distance : {3.0, 8.0}) {
+                for (double speed : {2.0, -2.0, 5.0, -5.0}) {
+                    rotating_sequence(config, t0, distance, speed, CV_PI - 0.005, 0.08, 0.1);
                 }
-                require(std::hypot(tools::limit_rad(plan.yaw - plan.target_yaw),
-                                   plan.pitch - plan.target_pitch) < 0.0035,
-                        "Recovered solver retained the failed trajectory");
-                require(!plan.fire, "Recovered solver fired without gimbal feedback");
-                recovered = true;
-                std::cout << "Recovered after " << i << " stationary frames\n";
-                break;
             }
-            require(recovered, "Planner did not recover from a failed solve within 50 frames");
+        } else if (scenario == "planner_failed_solve" || scenario == "planner_solve_recovery") {
+            // Deliberately demand rotational tracking with only 0.01 rad/s^2.
+            // This forces true constrained nonconvergence without treating a
+            // valid, normally actuated rotating target as an expected failure.
+            auto limited = toml::parse_file(config);
+            limited["planner"].as_table()->insert_or_assign("max_yaw_acc", 0.01);
+            limited["planner"].as_table()->insert_or_assign("max_pitch_acc", 0.01);
+            const auto path = std::filesystem::temp_directory_path() /
+                ("robocore-mpc-bounds-" + std::to_string(t0.time_since_epoch().count()) + ".toml");
+            std::ofstream(path) << limited;
+            Planner planner(path.string());
+            std::filesystem::remove(path);
+            require_stopped(planner.plan(std::optional{rotating_target(t0, 0.0)}, 22, t0));
+            if (scenario == "planner_solve_recovery") {
+                bool recovered = false;
+                for (int i = 1; i <= 50; ++i) {
+                    const auto stamp = t0 + i * 10ms;
+                    const auto target = rotating_target(stamp, 0.0, 0.0);
+                    const auto plan = planner.plan(std::optional{target}, 22, stamp);
+                    if (!plan.control) {
+                        require_stopped(plan);
+                        continue;
+                    }
+                    require(std::hypot(tools::limit_rad(plan.yaw - plan.target_yaw),
+                                       plan.pitch - plan.target_pitch) < 0.0035,
+                            "Recovered solver retained the failed trajectory");
+                    require(!plan.fire, "Recovered solver fired without gimbal feedback");
+                    recovered = true;
+                    std::cout << "Recovered after " << i << " stationary frames\n";
+                    break;
+                }
+                require(recovered, "Planner did not recover from a failed solve within 50 frames");
+            }
         } else if (scenario == "invalid_numeric") {
             Planner planner(config);
             const double nan = std::numeric_limits<double>::quiet_NaN();

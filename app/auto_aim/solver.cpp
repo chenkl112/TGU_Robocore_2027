@@ -1,5 +1,6 @@
 #include "solver.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <array>
 #include <limits>
@@ -35,10 +36,19 @@ Solver::Solver(const std::string& config_path)
     auto config = toml::parse_file(config_path);
     max_reprojection_error_ = config["solver"]["max_reprojection_error"].value_or(3.0);
     min_type_error_gap_ = config["solver"]["min_type_error_gap"].value_or(0.25);
+    size_noise_floor_ = config["solver"]["size_noise_floor"].value_or(std::min(1.5, max_reprojection_error_));
+    const double balance_pitch_degrees = config["solver"]["max_balance_pitch"].value_or(60.0);
     if (!std::isfinite(max_reprojection_error_) || max_reprojection_error_ <= 0 ||
-        !std::isfinite(min_type_error_gap_) || min_type_error_gap_ <= 0) {
-        throw std::invalid_argument("solver reprojection thresholds must be finite and positive");
+        !std::isfinite(min_type_error_gap_) || min_type_error_gap_ <= 0 ||
+        !std::isfinite(size_noise_floor_) || size_noise_floor_ <= 0 ||
+        size_noise_floor_ > max_reprojection_error_ ||
+        !std::isfinite(balance_pitch_degrees) || balance_pitch_degrees <= 0 ||
+        balance_pitch_degrees >= 90) {
+        throw std::invalid_argument(
+            "solver errors must be finite and positive, size_noise_floor <= max_reprojection_error, "
+            "and max_balance_pitch must be between 0 and 90 degrees");
     }
+    max_balance_pitch_ = balance_pitch_degrees * CV_PI / 180.0;
 
     auto read_matrix_3x3 = [&](const char* key) -> Eigen::Matrix3d {
         auto data = config["camera"][key].as_array();
@@ -129,19 +139,58 @@ bool Solver::solve_observation(Armor& armor, std::optional<ArmorType> tracked_ty
     }
 
     std::array<Armor, 2> candidates{armor, armor};
+    std::array<Armor, 2> unconstrained{armor, armor};
     std::array<double, 2> errors;
+    std::array<double, 2> unconstrained_errors;
+    bool upright_candidate = false;
+    bool tilted_small_candidate = false;
     errors.fill(std::numeric_limits<double>::infinity());
+    unconstrained_errors.fill(std::numeric_limits<double>::infinity());
     for (int i = 0; i < 2; ++i) {
         candidates[i].type = i == 0 ? ArmorType::big : ArmorType::small;
         double error;
-        if (solve_pose(candidates[i], error) && error <= max_reprojection_error_) errors[i] = error;
+        if (!solve_pose(candidates[i], error, true)) continue;
+        unconstrained[i] = candidates[i];
+        unconstrained_errors[i] = error;
+        // When neither metric hypothesis supports a near-horizontal plate
+        // edge, the upright mounting assumption is contradicted. In particular,
+        // do not let the balance model's extra pitch freedom explain chassis
+        // roll on a small infantry robot as a different physical size.
+        const double roll = std::abs(candidates[i].ypr_in_world[2]);
+        upright_candidate = upright_candidate ||
+            (error <= max_reprojection_error_ && roll <= 3 * CV_PI / 180);
+        const bool fitted = solve_size_pose(candidates[i], error);
+        if (i == 1 && (!fitted || error > size_noise_floor_)) {
+            // Only an ambiguity veto: allow chassis roll and +/-15 degrees of
+            // small-plate mounting pitch. Compare pixel residuals under that
+            // model, since raw PnP pitch itself is very noisy at long range.
+            auto tilted = unconstrained[i];
+            double tilted_error;
+            tilted_small_candidate = solve_size_pose(tilted, tilted_error, true) &&
+                tilted_error <= size_noise_floor_;
+        }
+        if (fitted && error <= max_reprojection_error_) errors[i] = error;
+    }
+    if (!upright_candidate || tilted_small_candidate) {
+        // A size already established by an associated track remains useful
+        // even when terrain roll or noisy distant corners invalidate gravity
+        // as NEW size evidence. Keep the general PnP pose in that case; the
+        // caller still has to pass its spatial association gate.
+        if (!tracked_type || *tracked_type == ArmorType::unknown) return false;
+        const int selected = *tracked_type == ArmorType::big ? 0 : 1;
+        if (unconstrained_errors[selected] > max_reprojection_error_ ||
+            !finish_pose(unconstrained[selected])) return false;
+        armor = std::move(unconstrained[selected]);
+        return true;
     }
     const int best = errors[0] < errors[1] ? 0 : 1;
     if (!std::isfinite(errors[best])) return false;
     int selected = best;
-    if (std::abs(errors[0] - errors[1]) < min_type_error_gap_) {
-        // Near-affine projections do not reliably distinguish the two sizes.
-        // Never promote a pixel aspect ratio to a confirmed vehicle identity.
+    if (std::max(errors[0], errors[1]) <= size_noise_floor_ ||
+        std::abs(errors[0] - errors[1]) < min_type_error_gap_) {
+        // A lower residual is not size evidence when both hypotheses explain
+        // the corners within detector noise. A spatial association must still
+        // validate a tracked prior after this ambiguity has been resolved.
         if (!tracked_type || *tracked_type == ArmorType::unknown) return false;
         selected = *tracked_type == ArmorType::big ? 0 : 1;
     }
@@ -150,7 +199,123 @@ bool Solver::solve_observation(Armor& armor, std::optional<ArmorType> tracked_ty
     return true;
 }
 
-bool Solver::solve_pose(Armor& armor, double& reprojection_error) const {
+bool Solver::solve_size_pose(Armor& armor, double& reprojection_error, bool allow_small_tilt) const {
+    // Infantry on level ground has horizontal plate edges in the world frame.
+    // Small plates have the 15-degree mounting pitch; a balancing chassis can
+    // change its pitch. Fit these physical models before comparing sizes: a
+    // free-pose small plate can otherwise explain a frontal large plate by
+    // tilting its lightbars about 57 degrees and moving over a metre closer.
+    const bool balance = armor.type == ArmorType::big;
+    const int dimensions = allow_small_tilt ? 6 : balance ? 5 : 4;
+    const double mounting_pitch = 15.0 * CV_PI / 180.0;
+    const double min_pitch = allow_small_tilt ? 0 : -max_balance_pitch_;
+    const double max_pitch = allow_small_tilt ? 30 * CV_PI / 180 : max_balance_pitch_;
+    const Eigen::Matrix3d world_to_camera = R_camera2gimbal_.transpose() * R_gimbal2world_.transpose();
+    const Eigen::Vector3d camera_in_world = R_gimbal2world_ * t_camera2gimbal_;
+    const auto& model = balance ? BIG_ARMOR_POINTS : SMALL_ARMOR_POINTS;
+    std::vector<cv::Point3d> object_points;
+    for (const auto& point : model) object_points.emplace_back(point.x, point.y, point.z);
+
+    auto residual = [&](const Eigen::VectorXd& pose, Eigen::Matrix<double, 8, 1>& result) {
+        const double pitch = dimensions >= 5 ? pose[4] : mounting_pitch;
+        const double roll = allow_small_tilt ? pose[5] : 0;
+        const auto rotation = tools::rotation_matrix({pose[3], pitch, roll});
+        const Eigen::Vector3d translation = world_to_camera * (pose.head<3>() - camera_in_world);
+        if (!translation.allFinite() || translation.z() <= 0) return false;
+        cv::Mat rmat, rvec;
+        cv::eigen2cv(Eigen::Matrix3d(world_to_camera * rotation), rmat);
+        cv::Rodrigues(rmat, rvec);
+        std::vector<cv::Point2d> projected;
+        cv::projectPoints(object_points, rvec,
+                          cv::Vec3d(translation.x(), translation.y(), translation.z()),
+                          camera_matrix_, distort_coeffs_, projected);
+        for (int i = 0; i < 4; ++i) {
+            result[2 * i] = projected[i].x - armor.points[i].x;
+            result[2 * i + 1] = projected[i].y - armor.points[i].y;
+        }
+        return result.allFinite();
+    };
+
+    Eigen::VectorXd best_pose(dimensions);
+    double best_error = std::numeric_limits<double>::infinity();
+    const Eigen::Vector3d ray = armor.xyz_in_world - camera_in_world;
+    const double view_yaw = std::atan2(ray.y(), ray.x());
+    // Both planar pose branches matter when noisy distant corners make IPPE
+    // prefer the reflected normal. Refine each under the same physical model.
+    for (bool reflected : {false, true}) {
+        Eigen::VectorXd pose(dimensions);
+        pose.head<3>() = armor.xyz_in_world;
+        pose[3] = reflected ? 2 * view_yaw - armor.ypr_in_world[0] : armor.ypr_in_world[0];
+        if (dimensions >= 5) pose[4] = std::clamp((reflected ? -1 : 1) * armor.ypr_in_world[1],
+                                                min_pitch, max_pitch);
+        if (allow_small_tilt) pose[5] = armor.ypr_in_world[2];
+        Eigen::Matrix<double, 8, 1> errors;
+        if (!residual(pose, errors)) continue;
+        double cost = errors.squaredNorm();
+        double damping = 1e-3;
+        for (int iteration = 0; iteration < 30; ++iteration) {
+            Eigen::MatrixXd jacobian(8, dimensions);
+            constexpr double increment = 1e-5;
+            bool valid = true;
+            for (int column = 0; column < dimensions; ++column) {
+                auto perturbed = pose;
+                perturbed[column] += increment;
+                Eigen::Matrix<double, 8, 1> changed;
+                if (!residual(perturbed, changed)) { valid = false; break; }
+                jacobian.col(column) = (changed - errors) / increment;
+            }
+            if (!valid) break;
+            Eigen::MatrixXd normal = jacobian.transpose() * jacobian;
+            normal.diagonal().array() += damping * normal.diagonal().array().max(1.0);
+            Eigen::VectorXd gradient = jacobian.transpose() * errors;
+            Eigen::VectorXd step = normal.ldlt().solve(-gradient);
+            if (!step.allFinite()) break;
+            if (dimensions >= 5 &&
+                ((pose[4] <= min_pitch + 1e-9 && step[4] < 0) ||
+                 (pose[4] >= max_pitch - 1e-9 && step[4] > 0))) {
+                // At an active pitch bound, optimize the other coordinates
+                // without repeatedly proposing an infeasible coupled step.
+                normal.row(4).setZero();
+                normal.col(4).setZero();
+                normal(4, 4) = 1;
+                gradient[4] = 0;
+                step = normal.ldlt().solve(-gradient);
+                if (!step.allFinite()) break;
+            }
+            Eigen::VectorXd candidate = pose + step;
+            if (dimensions >= 5) candidate[4] = std::clamp(candidate[4], min_pitch, max_pitch);
+            Eigen::Matrix<double, 8, 1> changed;
+            if (residual(candidate, changed) && changed.squaredNorm() < cost) {
+                const double improvement = cost - changed.squaredNorm();
+                pose = std::move(candidate);
+                errors = changed;
+                cost = errors.squaredNorm();
+                damping = std::max(1e-9, damping / 3);
+                if (improvement < 1e-8 || step.norm() < 1e-8) break;
+            } else {
+                damping *= 10;
+                if (damping > 1e9) break;
+            }
+        }
+        if (cost < best_error) {
+            best_error = cost;
+            best_pose = pose;
+        }
+    }
+    if (!std::isfinite(best_error)) return false;
+    reprojection_error = std::sqrt(best_error) / 2;
+    armor.xyz_in_world = best_pose.head<3>();
+    armor.xyz_in_gimbal = R_gimbal2world_.transpose() * armor.xyz_in_world;
+    armor.ypr_in_world = {tools::limit_rad(best_pose[3]), dimensions >= 5 ? best_pose[4] : mounting_pitch,
+                          allow_small_tilt ? best_pose[5] : 0};
+    armor.ypr_in_gimbal = tools::eulers(
+        Eigen::Matrix3d(R_gimbal2world_.transpose() * tools::rotation_matrix(armor.ypr_in_world)), 2, 1, 0);
+    armor.ypd_in_world = tools::xyz2ypd(armor.xyz_in_world);
+    armor.yaw_raw = armor.ypr_in_world[0];
+    return armor.xyz_in_world.allFinite() && armor.ypr_in_world.allFinite();
+}
+
+bool Solver::solve_pose(Armor& armor, double& reprojection_error, bool refine) const {
     if (armor.type != ArmorType::big && armor.type != ArmorType::small) return false;
     if (armor.points.size() != 4) {
         LOG_WARN(MODULE, "PnP requires 4 armor points, got {}", armor.points.size());
@@ -183,12 +348,35 @@ bool Solver::solve_pose(Armor& armor, double& reprojection_error) const {
         return false;
     }
 
-    // Compare both physical sizes using the full PnP pose before imposing the
-    // yaw optimizer's upright-armor model. Units are pixels in the source image.
+    // Measure the general PnP fit in source-image pixels. This is a pose seed
+    // and validity check; size confidence comes from the mounting-model fits.
     std::vector<cv::Point2f> projected;
     cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_, projected);
     reprojection_error = cv::norm(armor.points, projected, cv::NORM_L2) / 2.0;
     if (!std::isfinite(reprojection_error)) return false;
+    if (refine) {
+        // IPPE is a planar initialization, not a least-squares optimum. Its
+        // residual can exceed the true corner noise and must not be used to
+        // rule out an alternative size without refinement.
+        auto refined_rvec = rvec;
+        auto refined_tvec = tvec;
+        try {
+            cv::solvePnPRefineLM(object_points, armor.points, camera_matrix_, distort_coeffs_,
+                                 refined_rvec, refined_tvec);
+            if (cv::checkRange(refined_rvec) && cv::checkRange(refined_tvec) && refined_tvec[2] > 0) {
+                cv::projectPoints(object_points, refined_rvec, refined_tvec,
+                                  camera_matrix_, distort_coeffs_, projected);
+                const double error = cv::norm(armor.points, projected, cv::NORM_L2) / 2.0;
+                if (error < reprojection_error) {
+                    rvec = refined_rvec;
+                    tvec = refined_tvec;
+                    reprojection_error = error;
+                }
+            }
+        } catch (const cv::Exception&) {
+            // Retain the already validated initialization if refinement fails.
+        }
+    }
 
     Eigen::Vector3d xyz_in_camera;
     cv::cv2eigen(tvec, xyz_in_camera);
