@@ -3,6 +3,7 @@
 #include <numeric>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
@@ -94,12 +95,16 @@ std::list<Target> Tracker::track(
     } else if (
         state_ == "tracking" && !armors.empty() &&
         armors.front().priority < target_.priority) {
-        found = set_target(armors, t);
+        found = set_target(armors, t, target_.priority);
         if (found) {
             state_ = "lost";  // A new identity must pass detection confirmation again.
             LOG_INFO(
                 MODULE, "Switch to higher-priority target {}",
-                ARMOR_NAMES[armors.front().name]);
+                ARMOR_NAMES[target_.name]);
+        } else {
+            // An unresolved higher-priority detection must not interrupt an
+            // already associated target in this same frame.
+            found = update_target(armors, t);
         }
     } else {
         found = update_target(armors, t);
@@ -159,45 +164,37 @@ void Tracker::state_machine(bool found) {
 }
 
 bool Tracker::set_target(
-    std::list<Armor>& armors, std::chrono::steady_clock::time_point t) {
-    if (armors.empty()) return false;
-
-    auto& armor = armors.front();
-    if (!solver_.solve(armor)) return false;
-
-    auto is_balance = (armor.type == ArmorType::big) &&
-                      (armor.name == ArmorName::three || armor.name == ArmorName::four ||
-                       armor.name == ArmorName::five);
-
-    if (is_balance) {
+    std::list<Armor>& armors, std::chrono::steady_clock::time_point t,
+    std::optional<ArmorPriority> higher_than) {
+    for (auto& armor : armors) {
+        if (higher_than && armor.priority >= *higher_than) break;
+        auto candidate = armor;
+        if (!solver_.solve_observation(candidate)) continue;
+        const bool is_balance = candidate.type == ArmorType::big &&
+            (candidate.name == ArmorName::three || candidate.name == ArmorName::four ||
+             candidate.name == ArmorName::five);
         Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1}};
-        target_ = Target(armor, t, 0.2, 2, P0_dig);
-    } else {
-        Eigen::VectorXd P0_dig{{1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1}};
-        target_ = Target(armor, t, 0.2, 4, P0_dig);
+        target_ = Target(candidate, t, 0.2, is_balance ? 2 : 4, P0_dig);
+        armor = std::move(candidate);
+        return true;
     }
-
-    return true;
+    return false;
 }
 
 bool Tracker::update_target(
     std::list<Armor>& armors, std::chrono::steady_clock::time_point t) {
     target_.predict(t);
 
-    int found_count = 0;
-    for (const auto& armor : armors) {
-        if (armor.name != target_.name || armor.type != target_.armor_type) continue;
-        found_count++;
-    }
-
-    if (found_count == 0) return false;
-
     int solved_count = 0;
     for (auto& armor : armors) {
-        if (armor.name != target_.name || armor.type != target_.armor_type) continue;
-
-        if (!solver_.solve(armor)) continue;
-        if (target_.update(armor, max_match_distance_)) ++solved_count;
+        if (armor.name != target_.name) continue;
+        auto candidate = armor;
+        if (!solver_.solve_observation(candidate, target_.armor_type) ||
+            candidate.type != target_.armor_type) continue;
+        if (target_.update(candidate, max_match_distance_)) {
+            armor = std::move(candidate);
+            ++solved_count;
+        }
     }
 
     return solved_count > 0;

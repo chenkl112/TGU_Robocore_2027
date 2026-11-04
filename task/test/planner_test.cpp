@@ -31,7 +31,14 @@ int main(int argc, char* argv[]) {
 
     app::auto_aim::Planner planner(config_path);
     app::auto_aim::Target target(distance, angular_speed, 0.2, 0.1);
-    const auto plan = planner.plan(target, bullet_speed);
+    // Offline self-check: allow bounded warm-start attempts, as successive live
+    // frames do. A rejected plan must never count as a successful self-check.
+    constexpr int max_attempts = 10;
+    app::auto_aim::Plan plan{};
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        plan = planner.plan(target, bullet_speed);
+        if (plan.control) break;
+    }
 
     const std::array outputs{
         plan.yaw, plan.yaw_vel, plan.yaw_acc,
@@ -48,7 +55,7 @@ int main(int argc, char* argv[]) {
         plan.pitch_vel, plan.pitch_acc);
 
     if (!plan.control || !finite) {
-        LOG_ERROR(MODULE, "MPC failed to produce a finite control plan");
+        LOG_ERROR(MODULE, "MPC failed to produce a converged, finite control plan within {} attempts", max_attempts);
         return 1;
     }
     return 0;

@@ -29,9 +29,10 @@ bool Shooter::shoot(
     const bool command_is_stable =
         std::abs(tools::limit_rad(last_command_.yaw - command.yaw)) < tolerance * 2.0 &&
         std::abs(last_command_.pitch - command.pitch) < tolerance * 2.0;
+    // Stability uses the previous command; alignment must use the current aim.
     const bool gimbal_is_aligned =
-        std::abs(tools::limit_rad(gimbal_position[0] - last_command_.yaw)) < tolerance &&
-        std::abs(gimbal_position[1] - last_command_.pitch) < tolerance;
+        std::abs(tools::limit_rad(gimbal_position[0] - command.yaw)) < tolerance &&
+        std::abs(gimbal_position[1] - command.pitch) < tolerance;
 
     last_command_ = command;
     return command_is_stable && gimbal_is_aligned && aimer.debug_aim_point.valid;

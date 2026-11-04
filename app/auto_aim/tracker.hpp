@@ -5,6 +5,7 @@
 #include <Eigen/Dense>
 #include <chrono>
 #include <list>
+#include <optional>
 #include <string>
 
 #include "armor.hpp"
@@ -40,7 +41,8 @@ private:
 
     void state_machine(bool found);
 
-    bool set_target(std::list<Armor>& armors, std::chrono::steady_clock::time_point t);
+    bool set_target(std::list<Armor>& armors, std::chrono::steady_clock::time_point t,
+                    std::optional<ArmorPriority> higher_than = std::nullopt);
 
     bool update_target(
         std::list<Armor>& armors, std::chrono::steady_clock::time_point t);

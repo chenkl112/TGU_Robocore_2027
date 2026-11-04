@@ -41,7 +41,33 @@ included.
 5. Verify MPC angle, angular-velocity and angular-acceleration outputs on a disabled-friction-wheel rig.
 6. Enable `[planner].auto_fire` only after the previous checks pass.
 
+## Physical size and pose
+
+The detectors label infantry (3/4/5) size as `unknown`; pixel aspect ratio does
+not determine physical size. `Solver::solve_observation` fits both 135 mm and
+230 mm widths using the calibrated camera, comparing RMS corner reprojection
+errors from the complete PnP poses before yaw optimization. Fits above
+`solver.max_reprojection_error` are rejected. If their difference is below
+`solver.min_type_error_gap`, a new track waits for clearer evidence. Both thresholds
+are in original-image pixels and require tuning against recorded corner noise.
+
+An existing track may resolve an ambiguous size with its previous physical size,
+but the observation must still pass the 3D association gate. Clear evidence for a
+different size is not overwritten by that prior. Unknown higher-priority detections
+do not prevent acquiring or updating another valid target. `Solver::solve` remains
+the geometry interface for callers that already know the physical size.
+
+Yaw refinement searches the visible directions around the camera-to-target ray.
+It retains the original PnP yaw unless a candidate improves reprojection error.
+
 ## Fire and freshness checks
+
+`Planner::plan` enables control only when both yaw and pitch MPC solves converge.
+Each axis has a fixed budget of twenty solver iterations per frame.
+If either solve fails, it returns `control = false`, `fire = false` and zero control
+outputs. Solver state is retained so subsequent frames can converge and resume control.
+The offline `planner_test` allows at most ten warm-start attempts and still fails if
+none produces a converged, finite control plan.
 
 `Planner::plan` accepts optional `io::GimbalState` feedback. Calls without feedback can
 produce a control plan but always return `fire = false`. Live feedback includes a local
@@ -65,7 +91,8 @@ degrees, and view angles 0/35/70/80 degrees. OpenCV IPPE results that are nonfin
 or behind the camera are retried with the iterative PnP solver using the same points.
 
 The retained `Shooter` path requires both yaw and pitch command stability and actual
-gimbal alignment before returning `true`. The live MPC entry point does not call this
+gimbal alignment with the current command before returning `true`. The previous
+command is used only for stability. The live MPC entry point does not call this
 legacy path; its Planner and Gimbal checks independently require current yaw/pitch
 feedback before allowing fire. A disconnected Gimbal enters IDLE and retries the
 configured serial port at `gimbal.reconnect_delay_ms` until valid feedback returns.

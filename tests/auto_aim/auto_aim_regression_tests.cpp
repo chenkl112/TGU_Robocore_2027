@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <fstream>
@@ -50,6 +51,23 @@ Target world_target(Clock::time_point t) {
     Target target(armor, t, 0.2, 4, covariance);
     target.observed = true;
     return target;
+}
+
+Target rotating_target(Clock::time_point t, double phase, double speed = 2.0) {
+    auto target = world_target(t);
+    auto& state = const_cast<tools::ExtendedKalmanFilter&>(target.ekf()).x;
+    state[0] = 3.0;
+    state[6] = phase;
+    state[7] = speed;
+    return target;
+}
+
+void require_stopped(const Plan& plan) {
+    require(!plan.control && !plan.fire, "Failed MPC solve retained control or fire");
+    const std::array values{plan.target_yaw, plan.target_pitch, plan.yaw, plan.yaw_vel,
+                            plan.yaw_acc, plan.pitch, plan.pitch_vel, plan.pitch_acc};
+    require(std::all_of(values.begin(), values.end(), [](float value) { return value == 0.0f; }),
+            "Stopped MPC plan retained a nonzero or nonfinite command");
 }
 
 int main(int argc, char** argv) {
@@ -201,7 +219,12 @@ int main(int argc, char** argv) {
             const double yaw = std::atan2(hit.y(), hit.x()) + cfg["planner"]["yaw_offset"].value_or(0.0) / 57.3;
             tools::Trajectory trajectory(22, hit.head<2>().norm(), hit.z());
             const double pitch = -trajectory.pitch - cfg["planner"]["pitch_offset"].value_or(0.0) / 57.3;
-            const auto plan = planner.plan(target, 22);
+            Plan plan{};
+            for (int attempt = 0; attempt < 10; ++attempt) {
+                plan = planner.plan(target, 22);
+                if (plan.control) break;
+                require_stopped(plan);
+            }
             const double yaw_error = std::abs(tools::limit_rad(plan.target_yaw - yaw));
             std::cout << "intercept yaw error: " << yaw_error * 180 / CV_PI << " deg\n";
             require(plan.control && yaw_error < 1e-5 && std::abs(plan.target_pitch - pitch) < 1e-5,
@@ -225,13 +248,73 @@ int main(int argc, char** argv) {
             require(!planner.plan(target, 22, t0 - 1ms).control, "Future target was accepted");
         } else if (scenario == "planner_acceleration_bounds") {
             Planner planner(config);
+            int controlled = 0;
             for (double w : {0., 1., 5., 10., 20., 30., 50., 100.}) {
                 const auto plan = planner.plan(Target(1, w, 0.2, 0.1), 22);
-                require(plan.control, "Finite rotating target did not produce control");
+                if (w == 0) require(plan.control, "Stationary target did not produce control");
+                if (!plan.control) {
+                    require_stopped(plan);
+                    continue;
+                }
+                ++controlled;
                 require(std::isfinite(plan.yaw) && std::isfinite(plan.pitch), "Nonfinite MPC angles");
                 require(std::abs(plan.yaw_acc) <= 50.0001f, "Yaw acceleration exceeds configured bound");
                 require(std::abs(plan.pitch_acc) <= 100.0001f, "Pitch acceleration exceeds configured bound");
             }
+            require(controlled > 0, "Acceleration bounds were never checked on an active plan");
+        } else if (scenario == "planner_failed_solve") {
+            Planner planner(config);
+            // With the default 10 ms delay this crosses a nearest-armor switch
+            // in the MPC history. The old rollout returned a 107-degree error.
+            const auto target = rotating_target(t0, 1.51);
+            require_stopped(planner.plan(std::optional{target}, 22, t0));
+        } else if (scenario == "planner_rotating_sequence") {
+            Planner planner(config);
+            int controlled = 0, stopped = 0;
+            double largest_error = 0.0;
+            for (int i = 0; i < 200; ++i) {
+                const auto stamp = t0 + i * 10ms;
+                const auto target = rotating_target(stamp, 2.0 * i * 0.01);
+                const auto plan = planner.plan(std::optional{target}, 22, stamp);
+                if (!plan.control) {
+                    require_stopped(plan);
+                    ++stopped;
+                    continue;
+                }
+                ++controlled;
+                const double error = std::hypot(tools::limit_rad(plan.yaw - plan.target_yaw),
+                                                plan.pitch - plan.target_pitch);
+                largest_error = std::max(largest_error, error);
+                require(std::isfinite(error) && error < 5.0 * CV_PI / 180.0,
+                        "Rotating sequence sent a control angle far from the interception reference");
+                require(std::abs(plan.yaw_acc) <= 50.0001f && std::abs(plan.pitch_acc) <= 100.0001f,
+                        "Rotating sequence exceeded its acceleration bounds");
+            }
+            require(controlled > 0, "Rotating sequence never produced a valid control plan");
+            require(stopped > 0, "Rotating sequence did not exercise rejection of a failed solve");
+            std::cout << "controlled=" << controlled << " stopped=" << stopped
+                      << " largest angle error=" << largest_error * 180 / CV_PI << " deg\n";
+        } else if (scenario == "planner_solve_recovery") {
+            Planner planner(config);
+            require_stopped(planner.plan(std::optional{rotating_target(t0, 1.51)}, 22, t0));
+            bool recovered = false;
+            for (int i = 1; i <= 50; ++i) {
+                const auto stamp = t0 + i * 10ms;
+                const auto target = rotating_target(stamp, 0.0, 0.0);
+                const auto plan = planner.plan(std::optional{target}, 22, stamp);
+                if (!plan.control) {
+                    require_stopped(plan);
+                    continue;
+                }
+                require(std::hypot(tools::limit_rad(plan.yaw - plan.target_yaw),
+                                   plan.pitch - plan.target_pitch) < 0.0035,
+                        "Recovered solver retained the failed trajectory");
+                require(!plan.fire, "Recovered solver fired without gimbal feedback");
+                recovered = true;
+                std::cout << "Recovered after " << i << " stationary frames\n";
+                break;
+            }
+            require(recovered, "Planner did not recover from a failed solve within 50 frames");
         } else if (scenario == "invalid_numeric") {
             Planner planner(config);
             const double nan = std::numeric_limits<double>::quiet_NaN();

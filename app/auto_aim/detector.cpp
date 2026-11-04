@@ -288,19 +288,7 @@ cv::Mat Detector::get_pattern(const cv::Mat& bgr_img, const Armor& armor) const 
 }
 
 ArmorType Detector::get_type(const Armor& armor) {
-    if (armor.ratio > 3.0) {
-        return ArmorType::big;
-    }
-
-    if (armor.ratio < 2.5) {
-        return ArmorType::small;
-    }
-
-    if (armor.name == ArmorName::one) {
-        return ArmorType::big;
-    }
-
-    return ArmorType::small;
+    return armor_type_from_name(armor.name);
 }
 
 cv::Point2f Detector::get_center_norm(

@@ -12,12 +12,19 @@ namespace app::auto_aim {
 enum Color { red, blue, extinguish, purple };
 inline const std::vector<std::string> COLORS = {"red", "blue", "extinguish", "purple"};
 
-enum ArmorType { big, small };
-inline const std::vector<std::string> ARMOR_TYPES = {"big", "small"};
+enum ArmorType { big, small, unknown };
+inline const std::vector<std::string> ARMOR_TYPES = {"big", "small", "unknown"};
 
 enum ArmorName { one, two, three, four, five, sentry, outpost, base, not_armor };
 inline const std::vector<std::string> ARMOR_NAMES = {
     "one", "two", "three", "four", "five", "sentry", "outpost", "base", "not_armor"};
+
+// Infantry can carry either physical size. Image aspect ratio is not a size label.
+constexpr ArmorType armor_type_from_name(ArmorName name) {
+    if (name == ArmorName::one) return ArmorType::big;
+    if (name == ArmorName::two || name == ArmorName::sentry) return ArmorType::small;
+    return ArmorType::unknown;
+}
 
 constexpr bool is_robot_target(ArmorName name) {
     return name == ArmorName::one || name == ArmorName::two ||
@@ -103,7 +110,7 @@ struct Armor {
     double side_ratio;
     double rectangular_error;
 
-    ArmorType type = ArmorType::small;
+    ArmorType type = ArmorType::unknown;
     ArmorName name = ArmorName::not_armor;
     ArmorPriority priority = ArmorPriority::fifth;
     int class_id = -1;

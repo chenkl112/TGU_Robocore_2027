@@ -221,13 +221,7 @@ bool YOLOV8::check_type(const Armor& armor) const {
 }
 
 ArmorType YOLOV8::get_type(const Armor& armor) {
-    if (armor.name == ArmorName::one) {
-        return ArmorType::big;
-    }
-    if (armor.name == ArmorName::two || armor.name == ArmorName::sentry) {
-        return ArmorType::small;
-    }
-    return armor.ratio > 3.0 ? ArmorType::big : ArmorType::small;
+    return armor_type_from_name(armor.name);
 }
 
 cv::Point2f YOLOV8::get_center_norm(

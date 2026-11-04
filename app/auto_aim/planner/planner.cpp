@@ -16,6 +16,9 @@ using namespace std::chrono_literals;
 
 namespace app::auto_aim {
 
+// Allow changing references to converge while keeping per-frame work bounded.
+constexpr int MAX_SOLVER_ITERATIONS = 20;
+
 Planner::Planner(const std::string& config_path) {
     auto config = toml::parse_file(config_path);
     yaw_offset_ = config["planner"]["yaw_offset"].value_or(0.0) / 57.3;
@@ -93,6 +96,10 @@ Plan Planner::plan(Target target, double bullet_speed, std::optional<io::GimbalS
 
     pitch_solver_->work->Xref = traj.block(2, 0, 2, HORIZON);
     const int pitch_status = tiny_solve(pitch_solver_);
+    // A finite, acceleration-limited rollout can still point far from the
+    // target when ADMM has not converged. Reject the entire command, while
+    // retaining both solvers' warm-start state for the next frame.
+    if (yaw_status != 0 || pitch_status != 0) return {};
     if (!yaw_solver_->solution->u.allFinite() || !pitch_solver_->solution->u.allFinite()) return {false};
 
     // ADMM's work->u is unconstrained until convergence. Roll out the projected
@@ -198,7 +205,7 @@ void Planner::setup_yaw_solver(const std::string& config_path) {
     Eigen::MatrixXd u_max = Eigen::MatrixXd::Constant(1, HORIZON - 1, max_yaw_acc);
     tiny_set_bound_constraints(yaw_solver_, x_min, x_max, u_min, u_max);
 
-    yaw_solver_->settings->max_iter = 10;
+    yaw_solver_->settings->max_iter = MAX_SOLVER_ITERATIONS;
 }
 
 void Planner::setup_pitch_solver(const std::string& config_path) {
@@ -241,7 +248,7 @@ void Planner::setup_pitch_solver(const std::string& config_path) {
     Eigen::MatrixXd u_max = Eigen::MatrixXd::Constant(1, HORIZON - 1, max_pitch_acc);
     tiny_set_bound_constraints(pitch_solver_, x_min, x_max, u_min, u_max);
 
-    pitch_solver_->settings->max_iter = 10;
+    pitch_solver_->settings->max_iter = MAX_SOLVER_ITERATIONS;
 }
 
 Eigen::Matrix<double, 2, 1> Planner::aim(const Target& target, double bullet_speed) {

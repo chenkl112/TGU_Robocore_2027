@@ -38,6 +38,12 @@ distort_coeffs = [
     0.0,
 ]
 
+[solver]
+# RMS corner reprojection errors in original-image pixels, before yaw optimization.
+max_reprojection_error = 3.0
+# Smaller differences leave infantry size unresolved unless a spatially matched track exists.
+min_type_error_gap = 0.25
+
 [detector]
 threshold = 150.0
 max_angle_error = 45.0

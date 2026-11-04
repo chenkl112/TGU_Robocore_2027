@@ -1,7 +1,10 @@
 #include "solver.hpp"
 
 #include <cmath>
+#include <array>
+#include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "tools/logger.hpp"
@@ -30,6 +33,12 @@ const std::vector<cv::Point3f> SMALL_ARMOR_POINTS{
 Solver::Solver(const std::string& config_path)
     : R_gimbal2world_(Eigen::Matrix3d::Identity()) {
     auto config = toml::parse_file(config_path);
+    max_reprojection_error_ = config["solver"]["max_reprojection_error"].value_or(3.0);
+    min_type_error_gap_ = config["solver"]["min_type_error_gap"].value_or(0.25);
+    if (!std::isfinite(max_reprojection_error_) || max_reprojection_error_ <= 0 ||
+        !std::isfinite(min_type_error_gap_) || min_type_error_gap_ <= 0) {
+        throw std::invalid_argument("solver reprojection thresholds must be finite and positive");
+    }
 
     auto read_matrix_3x3 = [&](const char* key) -> Eigen::Matrix3d {
         auto data = config["camera"][key].as_array();
@@ -102,6 +111,47 @@ void Solver::set_R_gimbal2world(const Eigen::Quaterniond& q) {
 }
 
 bool Solver::solve(Armor& armor) const {
+    double error;
+    return solve_pose(armor, error) && finish_pose(armor);
+}
+
+bool Solver::solve_observation(Armor& armor, std::optional<ArmorType> tracked_type) const {
+    if (!is_robot_target(armor.name)) return false;
+    const auto known_type = armor_type_from_name(armor.name);
+    if (known_type != ArmorType::unknown) {
+        auto candidate = armor;
+        candidate.type = known_type;
+        double error;
+        if (!solve_pose(candidate, error) || error > max_reprojection_error_ ||
+            !finish_pose(candidate)) return false;
+        armor = std::move(candidate);
+        return true;
+    }
+
+    std::array<Armor, 2> candidates{armor, armor};
+    std::array<double, 2> errors;
+    errors.fill(std::numeric_limits<double>::infinity());
+    for (int i = 0; i < 2; ++i) {
+        candidates[i].type = i == 0 ? ArmorType::big : ArmorType::small;
+        double error;
+        if (solve_pose(candidates[i], error) && error <= max_reprojection_error_) errors[i] = error;
+    }
+    const int best = errors[0] < errors[1] ? 0 : 1;
+    if (!std::isfinite(errors[best])) return false;
+    int selected = best;
+    if (std::abs(errors[0] - errors[1]) < min_type_error_gap_) {
+        // Near-affine projections do not reliably distinguish the two sizes.
+        // Never promote a pixel aspect ratio to a confirmed vehicle identity.
+        if (!tracked_type || *tracked_type == ArmorType::unknown) return false;
+        selected = *tracked_type == ArmorType::big ? 0 : 1;
+    }
+    if (!finish_pose(candidates[selected])) return false;
+    armor = std::move(candidates[selected]);
+    return true;
+}
+
+bool Solver::solve_pose(Armor& armor, double& reprojection_error) const {
+    if (armor.type != ArmorType::big && armor.type != ArmorType::small) return false;
     if (armor.points.size() != 4) {
         LOG_WARN(MODULE, "PnP requires 4 armor points, got {}", armor.points.size());
         return false;
@@ -133,6 +183,13 @@ bool Solver::solve(Armor& armor) const {
         return false;
     }
 
+    // Compare both physical sizes using the full PnP pose before imposing the
+    // yaw optimizer's upright-armor model. Units are pixels in the source image.
+    std::vector<cv::Point2f> projected;
+    cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_, projected);
+    reprojection_error = cv::norm(armor.points, projected, cv::NORM_L2) / 2.0;
+    if (!std::isfinite(reprojection_error)) return false;
+
     Eigen::Vector3d xyz_in_camera;
     cv::cv2eigen(tvec, xyz_in_camera);
     armor.xyz_in_gimbal = R_camera2gimbal_ * xyz_in_camera + t_camera2gimbal_;
@@ -149,6 +206,12 @@ bool Solver::solve(Armor& armor) const {
 
     armor.ypd_in_world = tools::xyz2ypd(armor.xyz_in_world);
 
+    armor.yaw_raw = armor.ypr_in_world[0];
+    return armor.xyz_in_world.allFinite() && armor.ypr_in_world.allFinite() &&
+           armor.ypd_in_world.allFinite();
+}
+
+bool Solver::finish_pose(Armor& armor) const {
     auto is_balance = (armor.type == ArmorType::big) &&
                       (armor.name == ArmorName::three || armor.name == ArmorName::four ||
                        armor.name == ArmorName::five);
@@ -160,6 +223,9 @@ bool Solver::solve(Armor& armor) const {
 
 std::vector<cv::Point2f> Solver::reproject_armor(
     const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type) const {
+    if (type != ArmorType::big && type != ArmorType::small) {
+        throw std::invalid_argument("armor reprojection requires a resolved physical size");
+    }
     auto sin_yaw = std::sin(yaw);
     auto cos_yaw = std::cos(yaw);
 
@@ -193,25 +259,26 @@ std::vector<cv::Point2f> Solver::reproject_armor(
 }
 
 void Solver::optimize_yaw(Armor& armor) const {
-    Eigen::Vector3d gimbal_ypr = tools::eulers(R_gimbal2world_, 2, 1, 0);
+    armor.yaw_raw = armor.ypr_in_world[0];
+    auto best_yaw = armor.yaw_raw;
+    auto min_error = armor_reprojection_error(armor, best_yaw);
+    if (!std::isfinite(min_error)) return;
 
-    constexpr int SEARCH_RANGE = 140;
-    auto yaw0 = tools::limit_rad(gimbal_ypr[0] - SEARCH_RANGE / 2 * CV_PI / 180.0);
-
-    auto min_error = 1e10;
-    auto best_yaw = armor.ypr_in_world[0];
-
-    for (int i = 0; i < SEARCH_RANGE; i++) {
-        double yaw = tools::limit_rad(yaw0 + i * CV_PI / 180.0);
+    // The visible yaw interval follows the target's camera ray, not the optical
+    // axis. Keep PnP as a candidate so the grid can never worsen a valid pose.
+    const Eigen::Vector3d camera_in_world = R_gimbal2world_ * t_camera2gimbal_;
+    const Eigen::Vector3d camera_to_armor = armor.xyz_in_world - camera_in_world;
+    const double view_yaw = std::atan2(camera_to_armor.y(), camera_to_armor.x());
+    for (int offset_deg = -90; offset_deg <= 90; ++offset_deg) {
+        const double yaw = tools::limit_rad(view_yaw + offset_deg * CV_PI / 180.0);
         auto error = armor_reprojection_error(armor, yaw);
 
-        if (error < min_error) {
+        if (std::isfinite(error) && error < min_error) {
             min_error = error;
             best_yaw = yaw;
         }
     }
 
-    armor.yaw_raw = armor.ypr_in_world[0];
     armor.ypr_in_world[0] = best_yaw;
 }
 

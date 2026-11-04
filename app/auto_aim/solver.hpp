@@ -5,6 +5,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include <opencv2/core/eigen.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,10 @@ public:
     void set_R_gimbal2world(const Eigen::Quaterniond& q);
 
     bool solve(Armor& armor) const;
+    // Resolve a detector observation using calibrated size hypotheses. A prior
+    // only breaks an ambiguous size tie; the caller must still associate in 3D.
+    bool solve_observation(
+        Armor& armor, std::optional<ArmorType> tracked_type = std::nullopt) const;
 
     std::vector<cv::Point2f> reproject_armor(
         const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type) const;
@@ -34,6 +39,11 @@ private:
     Eigen::Matrix3d R_camera2gimbal_;
     Eigen::Vector3d t_camera2gimbal_;
     Eigen::Matrix3d R_gimbal2world_;
+    double max_reprojection_error_ = 3.0;
+    double min_type_error_gap_ = 0.25;
+
+    bool solve_pose(Armor& armor, double& reprojection_error) const;
+    bool finish_pose(Armor& armor) const;
 
     void optimize_yaw(Armor& armor) const;
 
