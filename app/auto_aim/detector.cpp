@@ -6,36 +6,46 @@
 #include <format>
 #include <iterator>
 #include <limits>
-#include <numeric>
 
+#include "armor_image.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
-#include "tools/tomlpp.hpp"
+#include <stdexcept>
 
 static constexpr const char* MODULE = "AUTO_AIM";
 
 namespace app::auto_aim {
 
 Detector::Detector(const std::string& config_path, bool debug)
-    : classifier_(config_path), debug_(debug) {
-    auto config = toml::parse_file(config_path);
+    : Detector(load_vision_config(config_path), debug) {}
 
-    threshold_ = config["detector"]["threshold"].value_or(40.0);
-    max_angle_error_ = config["detector"]["max_angle_error"].value_or(15.0) / 57.3;
-    min_lightbar_ratio_ = config["detector"]["min_lightbar_ratio"].value_or(1.5);
-    max_lightbar_ratio_ = config["detector"]["max_lightbar_ratio"].value_or(8.0);
-    min_lightbar_length_ = config["detector"]["min_lightbar_length"].value_or(5.0);
-    min_armor_ratio_ = config["detector"]["min_armor_ratio"].value_or(0.8);
-    max_armor_ratio_ = config["detector"]["max_armor_ratio"].value_or(4.0);
-    max_side_ratio_ = config["detector"]["max_side_ratio"].value_or(2.5);
-    min_confidence_ = config["detector"]["min_confidence"].value_or(0.6);
-    max_rectangular_error_ = config["detector"]["max_rectangular_error"].value_or(10.0) / 57.3;
+Detector::Detector(const VisionConfig& config, bool debug)
+    : Detector(config.detector, config.classifier, debug) {}
+
+Detector::Detector(const DetectorConfig& config, const ClassifierConfig& classifier, bool debug)
+    : classifier_(classifier), debug_(debug) {
+    validate(config);
+    threshold_ = config.threshold;
+    max_angle_error_ = config.max_angle_error;
+    min_lightbar_ratio_ = config.min_lightbar_ratio;
+    max_lightbar_ratio_ = config.max_lightbar_ratio;
+    min_lightbar_length_ = config.min_lightbar_length;
+    min_armor_ratio_ = config.min_armor_ratio;
+    max_armor_ratio_ = config.max_armor_ratio;
+    max_side_ratio_ = config.max_side_ratio;
+    min_confidence_ = config.min_confidence;
+    max_rectangular_error_ = config.max_rectangular_error;
 
     save_path_ = "patterns";
     std::filesystem::create_directory(save_path_);
 }
 
 std::list<Armor> Detector::detect(const cv::Mat& bgr_img, int frame_count) {
+    if (bgr_img.empty())
+        return {};
+    if (bgr_img.type() != CV_8UC3) {
+        throw std::invalid_argument("Detector expects an 8-bit BGR image");
+    }
     cv::Mat gray_img;
     cv::cvtColor(bgr_img, gray_img, cv::COLOR_BGR2GRAY);
 
@@ -51,30 +61,32 @@ std::list<Armor> Detector::detect(const cv::Mat& bgr_img, int frame_count) {
         auto rotated_rect = cv::minAreaRect(contour);
         auto lightbar = Lightbar(rotated_rect, lightbar_id);
 
-        if (!check_geometry(lightbar)) continue;
+        if (!check_geometry(lightbar))
+            continue;
 
         lightbar.color = get_color(bgr_img, contour);
         lightbars.emplace_back(lightbar);
         lightbar_id += 1;
     }
 
-    lightbars.sort(
-        [](const Lightbar& a, const Lightbar& b) { return a.center.x < b.center.x; });
+    lightbars.sort([](const Lightbar& a, const Lightbar& b) { return a.center.x < b.center.x; });
 
     std::list<Armor> armors;
     for (auto left = lightbars.begin(); left != lightbars.end(); left++) {
         for (auto right = std::next(left); right != lightbars.end(); right++) {
-            if (left->color != right->color) continue;
+            if (left->color != right->color)
+                continue;
 
             auto armor = Armor(*left, *right);
-            if (!check_geometry(armor)) continue;
+            if (!check_geometry(armor))
+                continue;
 
             armor.pattern = get_pattern(bgr_img, armor);
             classifier_.classify(armor);
-            if (!check_name(armor)) continue;
+            if (!check_name(armor))
+                continue;
 
-            armor.type = get_type(armor);
-            if (!check_type(armor)) continue;
+            armor.type = armor_type_from_name(armor.name);
 
             armor.center_norm = get_center_norm(bgr_img, armor.center);
             armors.emplace_back(armor);
@@ -83,11 +95,8 @@ std::list<Armor> Detector::detect(const cv::Mat& bgr_img, int frame_count) {
 
     for (auto armor1 = armors.begin(); armor1 != armors.end(); armor1++) {
         for (auto armor2 = std::next(armor1); armor2 != armors.end(); armor2++) {
-            if (
-                armor1->left.id != armor2->left.id &&
-                armor1->left.id != armor2->right.id &&
-                armor1->right.id != armor2->left.id &&
-                armor1->right.id != armor2->right.id) {
+            if (armor1->left.id != armor2->left.id && armor1->left.id != armor2->right.id &&
+                armor1->right.id != armor2->left.id && armor1->right.id != armor2->right.id) {
                 continue;
             }
 
@@ -111,12 +120,15 @@ std::list<Armor> Detector::detect(const cv::Mat& bgr_img, int frame_count) {
 
     armors.remove_if([&](const Armor& a) { return a.duplicated; });
 
-    if (debug_) show_result(binary_img, bgr_img, lightbars, armors, frame_count);
+    if (debug_)
+        show_result(binary_img, bgr_img, lightbars, armors, frame_count);
 
     return armors;
 }
 
 bool Detector::detect(Armor& armor, const cv::Mat& bgr_img) {
+    if (bgr_img.empty() || bgr_img.type() != CV_8UC3)
+        return false;
     auto tl = armor.points[0];
     auto tr = armor.points[1];
     auto br = armor.points[2];
@@ -139,8 +151,7 @@ bool Detector::detect(Armor& armor, const cv::Mat& bgr_img) {
     auto armor_rotaterect = cv::minAreaRect(points);
     cv::Rect boundingBox = armor_rotaterect.boundingRect();
 
-    if (
-        boundingBox.x < 0 || boundingBox.y < 0 ||
+    if (boundingBox.x < 0 || boundingBox.y < 0 ||
         boundingBox.x + boundingBox.width > bgr_img.cols ||
         boundingBox.y + boundingBox.height > bgr_img.rows) {
         return false;
@@ -165,17 +176,18 @@ bool Detector::detect(Armor& armor, const cv::Mat& bgr_img) {
         auto rotated_rect = cv::minAreaRect(contour);
         auto lightbar = Lightbar(rotated_rect, lightbar_id);
 
-        if (!check_geometry(lightbar)) continue;
+        if (!check_geometry(lightbar))
+            continue;
 
         lightbar.color = get_color(armor_roi, contour);
         lightbars.emplace_back(lightbar);
         lightbar_id += 1;
     }
 
-    if (lightbars.size() < 2) return false;
+    if (lightbars.size() < 2)
+        return false;
 
-    lightbars.sort(
-        [](const Lightbar& a, const Lightbar& b) { return a.center.x < b.center.x; });
+    lightbars.sort([](const Lightbar& a, const Lightbar& b) { return a.center.x < b.center.x; });
 
     Lightbar* closest_left_lightbar = nullptr;
     Lightbar* closest_right_lightbar = nullptr;
@@ -198,17 +210,15 @@ bool Detector::detect(Armor& armor, const cv::Mat& bgr_img) {
         }
     }
 
-    if (
-        closest_left_lightbar && closest_right_lightbar &&
+    if (closest_left_lightbar && closest_right_lightbar &&
+        closest_left_lightbar != closest_right_lightbar &&
         min_distance_br_tr + min_distance_tl_bl < 15) {
-        armor.points[0] =
-            closest_left_lightbar->top + cv::Point2f(boundingBox.x, boundingBox.y);
-        armor.points[1] =
-            closest_right_lightbar->top + cv::Point2f(boundingBox.x, boundingBox.y);
+        armor.points[0] = closest_left_lightbar->top + cv::Point2f(boundingBox.x, boundingBox.y);
+        armor.points[1] = closest_right_lightbar->top + cv::Point2f(boundingBox.x, boundingBox.y);
         armor.points[2] =
             closest_right_lightbar->bottom + cv::Point2f(boundingBox.x, boundingBox.y);
-        armor.points[3] =
-            closest_left_lightbar->bottom + cv::Point2f(boundingBox.x, boundingBox.y);
+        armor.points[3] = closest_left_lightbar->bottom + cv::Point2f(boundingBox.x, boundingBox.y);
+        armor.pose_valid = false;
         return true;
     }
 
@@ -217,8 +227,7 @@ bool Detector::detect(Armor& armor, const cv::Mat& bgr_img) {
 
 bool Detector::check_geometry(const Lightbar& lightbar) const {
     auto angle_ok = lightbar.angle_error < max_angle_error_;
-    auto ratio_ok =
-        lightbar.ratio > min_lightbar_ratio_ && lightbar.ratio < max_lightbar_ratio_;
+    auto ratio_ok = lightbar.ratio > min_lightbar_ratio_ && lightbar.ratio < max_lightbar_ratio_;
     auto length_ok = lightbar.length > min_lightbar_length_;
     return angle_ok && ratio_ok && length_ok;
 }
@@ -234,30 +243,16 @@ bool Detector::check_name(const Armor& armor) const {
     const bool name_ok = is_robot_target(armor.name);
     auto confidence_ok = armor.confidence > min_confidence_;
 
-    if (name_ok && !confidence_ok) save(armor);
+    if (name_ok && !confidence_ok)
+        save(armor);
 
-    if (armor.name == ArmorName::five) LOG_DEBUG(MODULE, "See pattern 5");
+    if (armor.name == ArmorName::five)
+        LOG_DEBUG(MODULE, "See pattern 5");
 
     return name_ok && confidence_ok;
 }
 
-bool Detector::check_type(const Armor& armor) const {
-    const bool name_ok = (armor.type == ArmorType::small)
-                             ? armor.name != ArmorName::one
-                             : armor.name != ArmorName::two && armor.name != ArmorName::sentry;
-
-    if (!name_ok) {
-        LOG_DEBUG(
-            MODULE, "see strange armor: {} {}", ARMOR_TYPES[armor.type],
-            ARMOR_NAMES[armor.name]);
-        save(armor);
-    }
-
-    return name_ok;
-}
-
-Color Detector::get_color(
-    const cv::Mat& bgr_img, const std::vector<cv::Point>& contour) const {
+Color Detector::get_color(const cv::Mat& bgr_img, const std::vector<cv::Point>& contour) const {
     int red_sum = 0, blue_sum = 0;
 
     for (const auto& point : contour) {
@@ -269,30 +264,10 @@ Color Detector::get_color(
 }
 
 cv::Mat Detector::get_pattern(const cv::Mat& bgr_img, const Armor& armor) const {
-    auto tl = armor.left.center - armor.left.top2bottom * 1.125;
-    auto bl = armor.left.center + armor.left.top2bottom * 1.125;
-    auto tr = armor.right.center - armor.right.top2bottom * 1.125;
-    auto br = armor.right.center + armor.right.top2bottom * 1.125;
-
-    auto roi_left = std::max<int>(std::min(tl.x, bl.x), 0);
-    auto roi_top = std::max<int>(std::min(tl.y, tr.y), 0);
-    auto roi_right = std::min<int>(std::max(tr.x, br.x), bgr_img.cols);
-    auto roi_bottom = std::min<int>(std::max(bl.y, br.y), bgr_img.rows);
-    auto roi_tl = cv::Point(roi_left, roi_top);
-    auto roi_br = cv::Point(roi_right, roi_bottom);
-    auto roi = cv::Rect(roi_tl, roi_br);
-
-    if (roi.empty()) return {};
-
-    return bgr_img(roi);
+    return extract_armor_pattern(bgr_img, armor.points);
 }
 
-ArmorType Detector::get_type(const Armor& armor) {
-    return armor_type_from_name(armor.name);
-}
-
-cv::Point2f Detector::get_center_norm(
-    const cv::Mat& bgr_img, const cv::Point2f& center) const {
+cv::Point2f Detector::get_center_norm(const cv::Mat& bgr_img, const cv::Point2f& center) const {
     auto h = bgr_img.rows;
     auto w = bgr_img.cols;
     return {center.x / w, center.y / h};
@@ -301,32 +276,30 @@ cv::Point2f Detector::get_center_norm(
 void Detector::save(const Armor& armor) const {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
-    auto img_path =
-        std::format("{}/{}_{}.jpg", save_path_, static_cast<int>(armor.name), time_t);
+    auto img_path = std::format("{}/{}_{}.jpg", save_path_, static_cast<int>(armor.name), time_t);
     cv::imwrite(img_path, armor.pattern);
 }
 
-void Detector::show_result(
-    const cv::Mat& binary_img, const cv::Mat& bgr_img, const std::list<Lightbar>& lightbars,
-    const std::list<Armor>& armors, int frame_count) const {
+void Detector::show_result(const cv::Mat& binary_img, const cv::Mat& bgr_img,
+                           const std::list<Lightbar>& lightbars, const std::list<Armor>& armors,
+                           int frame_count) const {
     auto detection = bgr_img.clone();
-    tools::draw_text(
-        detection, std::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
+    tools::draw_text(detection, std::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
 
     for (const auto& lightbar : lightbars) {
-        auto info = std::format(
-            "{:.1f} {:.1f} {:.1f} {}", lightbar.angle_error * 57.3, lightbar.ratio,
-            lightbar.length, COLORS[lightbar.color]);
+        auto info = std::format("{:.1f} {:.1f} {:.1f} {}", lightbar.angle_error * 57.3,
+                                lightbar.ratio, lightbar.length, COLORS[lightbar.color]);
         tools::draw_text(detection, info, lightbar.top, {0, 255, 255});
         tools::draw_points(detection, lightbar.points, {0, 255, 255}, 3);
     }
 
     for (const auto& armor : armors) {
-        auto info = std::format(
-            "{:.2f} {:.2f} {:.1f} {:.2f} {} {}", armor.ratio, armor.side_ratio,
-            armor.rectangular_error * 57.3, armor.confidence, ARMOR_NAMES[armor.name],
-            ARMOR_TYPES[armor.type]);
-        tools::draw_points(detection, armor.points, {0, 255, 0});
+        auto info = std::format("{:.2f} {:.2f} {:.1f} {:.2f} {} {}", armor.ratio, armor.side_ratio,
+                                armor.rectangular_error * 57.3, armor.confidence,
+                                ARMOR_NAMES[armor.name], ARMOR_TYPES[armor.type]);
+        tools::draw_points(detection,
+                           std::vector<cv::Point2f>(armor.points.begin(), armor.points.end()),
+                           {0, 255, 0});
         tools::draw_text(detection, info, armor.left.bottom, {0, 255, 0});
     }
 
@@ -337,98 +310,4 @@ void Detector::show_result(
     cv::imshow("detection", detection);
 }
 
-void Detector::lightbar_points_corrector(
-    Lightbar& lightbar, const cv::Mat& gray_img) const {
-    constexpr float MAX_BRIGHTNESS = 25;
-    constexpr float ROI_SCALE = 0.07;
-    constexpr float SEARCH_START = 0.4;
-    constexpr float SEARCH_END = 0.6;
-
-    cv::Rect roi_box = lightbar.rotated_rect.boundingRect();
-    roi_box.x -= roi_box.width * ROI_SCALE;
-    roi_box.y -= roi_box.height * ROI_SCALE;
-    roi_box.width += 2 * roi_box.width * ROI_SCALE;
-    roi_box.height += 2 * roi_box.height * ROI_SCALE;
-
-    roi_box &= cv::Rect(0, 0, gray_img.cols, gray_img.rows);
-
-    cv::Mat roi = gray_img(roi_box);
-    const float mean_val = cv::mean(roi)[0];
-    roi.convertTo(roi, CV_32F);
-    cv::normalize(roi, roi, 0, MAX_BRIGHTNESS, cv::NORM_MINMAX);
-
-    const cv::Moments moments = cv::moments(roi);
-    const cv::Point2f centroid(
-        moments.m10 / moments.m00 + roi_box.x, moments.m01 / moments.m00 + roi_box.y);
-
-    std::vector<cv::Point2f> points;
-    for (int i = 0; i < roi.rows; ++i) {
-        for (int j = 0; j < roi.cols; ++j) {
-            const float weight = roi.at<float>(i, j);
-            if (weight > 1e-3) {
-                points.emplace_back(j, i);
-            }
-        }
-    }
-
-    cv::PCA pca(cv::Mat(points).reshape(1), cv::Mat(), cv::PCA::DATA_AS_ROW);
-    cv::Point2f axis(pca.eigenvectors.at<float>(0, 0), pca.eigenvectors.at<float>(0, 1));
-    axis /= cv::norm(axis);
-    if (axis.y > 0) axis = -axis;
-
-    const auto find_corner = [&](int direction) -> cv::Point2f {
-        const float dx = axis.x * direction;
-        const float dy = axis.y * direction;
-        const float search_length = lightbar.length * (SEARCH_END - SEARCH_START);
-
-        std::vector<cv::Point2f> candidates;
-
-        const int half_width = (lightbar.width - 2) / 2;
-        for (int i_offset = -half_width; i_offset <= half_width; ++i_offset) {
-            cv::Point2f start_point(
-                centroid.x + lightbar.length * SEARCH_START * dx + i_offset,
-                centroid.y + lightbar.length * SEARCH_START * dy);
-
-            cv::Point2f corner = start_point;
-            float max_diff = 0;
-            bool found = false;
-
-            for (float step = 0; step < search_length; ++step) {
-                const cv::Point2f cur_point(
-                    start_point.x + dx * step, start_point.y + dy * step);
-
-                if (
-                    cur_point.x < 0 || cur_point.x >= gray_img.cols ||
-                    cur_point.y < 0 || cur_point.y >= gray_img.rows) {
-                    break;
-                }
-
-                const auto prev_val =
-                    gray_img.at<uchar>(cv::Point2i(cur_point - cv::Point2f(dx, dy)));
-                const auto cur_val = gray_img.at<uchar>(cv::Point2i(cur_point));
-                const float diff = prev_val - cur_val;
-
-                if (diff > max_diff && prev_val > mean_val) {
-                    max_diff = diff;
-                    corner = cur_point - cv::Point2f(dx, dy);
-                    found = true;
-                }
-            }
-
-            if (found) {
-                candidates.push_back(corner);
-            }
-        }
-
-        return candidates.empty()
-                   ? cv::Point2f(-1, -1)
-                   : std::accumulate(
-                         candidates.begin(), candidates.end(), cv::Point2f(0, 0)) /
-                         static_cast<float>(candidates.size());
-    };
-
-    lightbar.top = find_corner(1);
-    lightbar.bottom = find_corner(-1);
-}
-
-}  // namespace app::auto_aim
+} // namespace app::auto_aim

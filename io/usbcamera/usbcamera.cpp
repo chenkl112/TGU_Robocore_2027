@@ -14,28 +14,29 @@ static double normalize_fps(double fps) {
 }
 
 USBCamera::USBCamera(int device_index, int width, int height, double fps)
-    : source_(device_index), width_(width), height_(height), fps_(normalize_fps(fps)) {
-    open(source_, width_, height_, fps_);
-    thread_ = std::thread(&USBCamera::capture_thread, this);
-}
+    : USBCamera(CameraConfig{device_index, width, height, fps}) {}
 
 USBCamera::USBCamera(const std::string& source, int width, int height, double fps)
-    : source_(source), width_(width), height_(height), fps_(normalize_fps(fps)) {
-    open(source_, width_, height_, fps_);
-    thread_ = std::thread(&USBCamera::capture_thread, this);
-}
+    : USBCamera(CameraConfig{source, width, height, fps}) {}
 
-USBCamera::USBCamera(
-    const std::variant<int, std::string>& source, int width, int height, double fps)
-    : source_(source), width_(width), height_(height), fps_(normalize_fps(fps)) {
+USBCamera::USBCamera(const std::variant<int, std::string>& source, int width, int height,
+                     double fps)
+    : USBCamera(CameraConfig{source, width, height, fps}) {}
+
+USBCamera::USBCamera(const CameraConfig& config)
+    : source_(config.source), width_(config.width), height_(config.height),
+      fps_(normalize_fps(config.fps)) {
+    validate(config);
     open(source_, width_, height_, fps_);
     thread_ = std::thread(&USBCamera::capture_thread, this);
 }
 
 USBCamera::~USBCamera() {
     stop();
-    if (thread_.joinable()) thread_.join();
-    if (cap_.isOpened()) cap_.release();
+    if (thread_.joinable())
+        thread_.join();
+    if (cap_.isOpened())
+        cap_.release();
 }
 
 void USBCamera::stop() {
@@ -43,21 +44,21 @@ void USBCamera::stop() {
     frame_cv_.notify_all();
 }
 
-void USBCamera::open(
-    const std::variant<int, std::string>& src, int width, int height, double fps) {
+void USBCamera::open(const std::variant<int, std::string>& src, int width, int height, double fps) {
     bool opened = false;
     if (std::holds_alternative<int>(src)) {
         opened = cap_.open(std::get<int>(src), cv::CAP_V4L2);
-        if (!opened) opened = cap_.open(std::get<int>(src));
+        if (!opened)
+            opened = cap_.open(std::get<int>(src));
     } else {
         const auto& path = std::get<std::string>(src);
         if (path.starts_with("/dev/video")) {
             opened = cap_.open(path, cv::CAP_V4L2);
         } else {
-            // FFmpeg accepts these at open time, including for RTSP/HTTP reads.
-            opened = cap_.open(path, cv::CAP_FFMPEG,
-                               {cv::CAP_PROP_OPEN_TIMEOUT_MSEC, 1000,
-                                cv::CAP_PROP_READ_TIMEOUT_MSEC, 500});
+            // 超时必须在打开时传给 FFmpeg，网络流的建立和读取都需要有界等待。
+            opened = cap_.open(
+                path, cv::CAP_FFMPEG,
+                {cv::CAP_PROP_OPEN_TIMEOUT_MSEC, 1000, cv::CAP_PROP_READ_TIMEOUT_MSEC, 500});
         }
     }
 
@@ -67,14 +68,16 @@ void USBCamera::open(
         return;
     }
 
-    if (width > 0) cap_.set(cv::CAP_PROP_FRAME_WIDTH, width);
-    if (height > 0) cap_.set(cv::CAP_PROP_FRAME_HEIGHT, height);
+    if (width > 0)
+        cap_.set(cv::CAP_PROP_FRAME_WIDTH, width);
+    if (height > 0)
+        cap_.set(cv::CAP_PROP_FRAME_HEIGHT, height);
     cap_.set(cv::CAP_PROP_FPS, normalize_fps(fps));
     cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
 
-    LOG_INFO(
-        MODULE, "[USBCamera] opened {}x{} @{}fps", static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH)),
-        static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT)), cap_.get(cv::CAP_PROP_FPS));
+    LOG_INFO(MODULE, "[USBCamera] opened {}x{} @{}fps",
+             static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH)),
+             static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT)), cap_.get(cv::CAP_PROP_FPS));
     ok_ = true;
 }
 
@@ -93,7 +96,8 @@ void USBCamera::capture_thread() {
             if (cap_.getBackendName() == "V4L2") {
                 std::vector<cv::VideoCapture> streams{cap_};
                 std::vector<int> ready;
-                if (!cv::VideoCapture::waitAny(streams, ready, 50'000'000)) continue;
+                if (!cv::VideoCapture::waitAny(streams, ready, 50'000'000))
+                    continue;
                 got = cap_.retrieve(img);
             } else {
                 got = cap_.read(img);
@@ -116,9 +120,9 @@ void USBCamera::capture_thread() {
             frame_cv_.notify_one();
 
             const auto frame_period = std::chrono::duration<double>(1.0 / fps_);
-            const auto next_frame = capture_started +
-                                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                        frame_period);
+            const auto next_frame =
+                capture_started +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(frame_period);
             std::this_thread::sleep_until(next_frame);
         } catch (const std::exception& error) {
             LOG_ERROR(MODULE, "Camera capture failed: {}", error.what());
@@ -130,9 +134,8 @@ void USBCamera::capture_thread() {
 
 void USBCamera::read(cv::Mat& img, std::chrono::steady_clock::time_point& timestamp) {
     std::unique_lock<std::mutex> lock(mutex_);
-    frame_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
-        return quit_ || frame_sequence_ != consumed_sequence_;
-    });
+    frame_cv_.wait_for(lock, std::chrono::milliseconds(50),
+                       [this] { return quit_ || frame_sequence_ != consumed_sequence_; });
     if (quit_ || frame_sequence_ == consumed_sequence_) {
         img.release();
         return;
@@ -142,4 +145,4 @@ void USBCamera::read(cv::Mat& img, std::chrono::steady_clock::time_point& timest
     consumed_sequence_ = frame_sequence_;
 }
 
-}  // namespace io
+} // namespace io

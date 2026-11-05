@@ -1,113 +1,106 @@
-#ifndef TOOLS__THREAD_SAFE_QUEUE_HPP
-#define TOOLS__THREAD_SAFE_QUEUE_HPP
+#pragma once
 
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
-#include <iostream>
 #include <mutex>
+#include <optional>
 #include <queue>
+#include <stdexcept>
+#include <stop_token>
 #include <utility>
 
-namespace tools
-{
-template <typename T, bool PopWhenFull = false>
-class ThreadSafeQueue
-{
-public:
-  ThreadSafeQueue(
-    size_t max_size, std::function<void(void)> full_handler = [] {})
-  : max_size_(max_size), full_handler_(full_handler)
-  {
-  }
+namespace tools {
 
-  void push(const T & value)
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (queue_.size() >= max_size_) {
-      if (PopWhenFull) {
-        queue_.pop();
-      } else {
-        full_handler_();
-        return;
-      }
-    }
-
-    queue_.push(value);
-    not_empty_condition_.notify_all();
-  }
-
-  void pop(T & value)
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    not_empty_condition_.wait(lock, [this] { return !queue_.empty(); });
-
-    if (queue_.empty()) {
-      std::cerr << "Error: Attempt to pop from an empty queue." << std::endl;
-      return;
-    }
-
-    value = queue_.front();
-    queue_.pop();
-  }
-
-  T pop()
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    not_empty_condition_.wait(lock, [this] { return !queue_.empty(); });
-
-    T value = std::move(queue_.front());
-    queue_.pop();
-    return std::move(value);
-  }
-
-  T front()
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    not_empty_condition_.wait(lock, [this] { return !queue_.empty(); });
-
-    return queue_.front();
-  }
-
-  void back(T & value)
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (queue_.empty()) {
-      std::cerr << "Error: Attempt to access the back of an empty queue." << std::endl;
-      return;
-    }
-
-    value = queue_.back();
-  }
-
-  bool empty()
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return queue_.empty();
-  }
-
-  void clear()
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-    while (!queue_.empty()) {
-      queue_.pop();
-    }
-    not_empty_condition_.notify_all();  // 如果其他线程正在等待队列不为空，这样可以唤醒它们
-  }
-
-private:
-  std::queue<T> queue_;
-  size_t max_size_;
-  mutable std::mutex mutex_;
-  std::condition_variable not_empty_condition_;
-  std::function<void(void)> full_handler_;
+class QueueClosed : public std::runtime_error {
+  public:
+    QueueClosed() : std::runtime_error("queue is closed") {}
 };
 
-}  // namespace tools
+// 有界消息队列：满时可丢弃最旧消息；关闭后拒绝写入，已有消息仍可被取完。
+// 等待支持停止令牌，消费者不必依赖特殊数据或轮询来退出。
+template <typename T, bool PopWhenFull = false> class ThreadSafeQueue {
+  public:
+    explicit ThreadSafeQueue(
+        std::size_t capacity, std::function<void()> full_handler = [] {})
+        : capacity_(capacity), full_handler_(std::move(full_handler)) {
+        if (capacity == 0)
+            throw std::invalid_argument("queue capacity must be positive");
+    }
 
-#endif  // TOOLS__THREAD_SAFE_QUEUE_HPP
+    bool push(T value) {
+        std::unique_lock lock(mutex_);
+        if (closed_)
+            return false;
+        if (queue_.size() == capacity_) {
+            if constexpr (PopWhenFull) {
+                queue_.pop();
+            } else {
+                // 用户回调可能访问队列，不能在持锁期间执行。
+                lock.unlock();
+                full_handler_();
+                return false;
+            }
+        }
+        queue_.push(std::move(value));
+        condition_.notify_one();
+        return true;
+    }
+
+    std::optional<T> wait_pop(std::stop_token stop = {}) {
+        std::unique_lock lock(mutex_);
+        condition_.wait(lock, stop, [this] { return closed_ || !queue_.empty(); });
+        if (stop.stop_requested() || queue_.empty())
+            return std::nullopt;
+        T value = std::move(queue_.front());
+        queue_.pop();
+        return value;
+    }
+
+    T pop() {
+        auto value = wait_pop();
+        if (!value)
+            throw QueueClosed();
+        return std::move(*value);
+    }
+
+    void pop(T& value) {
+        value = pop();
+    }
+
+    std::optional<T> try_pop() {
+        std::lock_guard lock(mutex_);
+        if (queue_.empty())
+            return std::nullopt;
+        T value = std::move(queue_.front());
+        queue_.pop();
+        return value;
+    }
+
+    bool empty() const {
+        std::lock_guard lock(mutex_);
+        return queue_.empty();
+    }
+
+    void close() {
+        std::lock_guard lock(mutex_);
+        closed_ = true;
+        condition_.notify_all();
+    }
+
+    void clear() {
+        std::lock_guard lock(mutex_);
+        std::queue<T> empty;
+        queue_.swap(empty);
+    }
+
+  private:
+    std::queue<T> queue_;
+    const std::size_t capacity_;
+    std::function<void()> full_handler_;
+    mutable std::mutex mutex_;
+    std::condition_variable_any condition_;
+    bool closed_ = false;
+};
+
+} // namespace tools

@@ -8,30 +8,33 @@
 #include <string>
 
 #include "armor.hpp"
+#include "config.hpp"
 
 namespace app::auto_aim {
 
 class YOLOBase {
-public:
+  public:
     virtual ~YOLOBase() = default;
     virtual std::list<Armor> detect(const cv::Mat& img, int frame_count) = 0;
-    virtual std::list<Armor> postprocess(
-        double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count) = 0;
+    virtual std::list<Armor> postprocess(double scale, const cv::Mat& output,
+                                         const cv::Mat& bgr_img, int frame_count) = 0;
 };
 
 class YOLO {
-public:
+  public:
     YOLO(const std::string& config_path, bool debug = true);
+    YOLO(const YoloConfig& config, const ClassifierConfig& classifier, bool debug = true);
 
     std::list<Armor> detect(const cv::Mat& img, int frame_count = -1);
 
-    std::list<Armor> postprocess(
-        double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count);
+    std::list<Armor> postprocess(double scale, const cv::Mat& output, const cv::Mat& bgr_img,
+                                 int frame_count);
 
-private:
+  private:
+    explicit YOLO(const VisionConfig& config, bool debug);
     std::unique_ptr<YOLOBase> yolo_;
 };
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim
 
-#endif  // TGU_ROBOCORE_2027_YOLO_HPP
+#endif // TGU_ROBOCORE_2027_YOLO_HPP

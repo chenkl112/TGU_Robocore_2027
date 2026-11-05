@@ -1,0 +1,17 @@
+审查基准：auto-aim-v0.1 / e454a1819cc19f1bbf1b16becebb217b35585766
+Release 构建通过；CTest 62/62 通过，耗时 26.39 s。
+独立语法告警检查：32 个项目翻译单元；按文件、行号和消息去重后有 82 条诊断。
+其中 13 条为初始化顺序提示，69 条为聚合体部分初始化提示；不等于 82 个功能缺陷。
+
+STALE_TARGET direct_control=1 optional_control=0
+PREDICT_TIMESTAMP relative_advanced_ms=0 absolute_advanced_ms=10
+PREDICT_COMPOSITION relative_then_absolute_yaw=0.06 absolute_then_absolute_yaw=0.04
+ROI_RESOLUTION digit=1 fresh_count=1 after_small_frame_count=0
+ROI_RESOLUTION digit=2 fresh_count=0 after_small_frame_count=0
+ROI_RESOLUTION digit=3 fresh_count=0 after_small_frame_count=0
+ROI_RESOLUTION digit=4 fresh_count=1 after_small_frame_count=0
+ROI_RESOLUTION digit=5 fresh_count=0 after_small_frame_count=0
+ROI_FIXTURE_HAS_POSITIVE_CONTROL=1
+POSE_COST samples=100 accepted=100 mean_ms=0.369876
+
+BACKPRESSURE send_ms=250.766 max_mode_query_ms=250.399

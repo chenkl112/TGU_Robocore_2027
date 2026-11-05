@@ -9,17 +9,20 @@
 namespace tools {
 
 double limit_rad(double angle) {
-    if (!std::isfinite(angle)) return std::numeric_limits<double>::quiet_NaN();
+    if (!std::isfinite(angle))
+        return std::numeric_limits<double>::quiet_NaN();
     const double wrapped = std::remainder(angle, 2 * CV_PI);
     return wrapped <= -CV_PI ? CV_PI : wrapped;
 }
 
 Eigen::Vector3d eulers(Eigen::Quaterniond q, int axis0, int axis1, int axis2, bool extrinsic) {
-    if (!extrinsic) std::swap(axis0, axis2);
+    if (!extrinsic)
+        std::swap(axis0, axis2);
 
     auto i = axis0, j = axis1, k = axis2;
     auto is_proper = (i == k);
-    if (is_proper) k = 3 - i - j;
+    if (is_proper)
+        k = 3 - i - j;
     auto sign = (i - j) * (j - k) * (k - i) / 2;
 
     double a, b, c, d;
@@ -53,23 +56,29 @@ Eigen::Vector3d eulers(Eigen::Quaterniond q, int axis0, int axis1, int axis2, bo
     } else {
         if (!extrinsic) {
             eulers[0] = 0;
-            if (!safe1) eulers[2] = 2 * half_sum;
-            if (!safe2) eulers[2] = -2 * half_diff;
+            if (!safe1)
+                eulers[2] = 2 * half_sum;
+            if (!safe2)
+                eulers[2] = -2 * half_diff;
         } else {
             eulers[2] = 0;
-            if (!safe1) eulers[0] = 2 * half_sum;
-            if (!safe2) eulers[0] = 2 * half_diff;
+            if (!safe1)
+                eulers[0] = 2 * half_sum;
+            if (!safe2)
+                eulers[0] = 2 * half_diff;
         }
     }
 
-    for (int i = 0; i < 3; i++) eulers[i] = limit_rad(eulers[i]);
+    for (int i = 0; i < 3; i++)
+        eulers[i] = limit_rad(eulers[i]);
 
     if (!is_proper) {
         eulers[2] *= sign;
         eulers[1] -= CV_PI / 2;
     }
 
-    if (!extrinsic) std::swap(eulers[0], eulers[2]);
+    if (!extrinsic)
+        std::swap(eulers[0], eulers[2]);
 
     return eulers;
 }
@@ -90,12 +99,11 @@ Eigen::Matrix3d rotation_matrix(const Eigen::Vector3d& ypr) {
     double cos_roll = std::cos(roll);
     double sin_roll = std::sin(roll);
 
-    Eigen::Matrix3d R{
-        {cos_yaw * cos_pitch, cos_yaw * sin_pitch * sin_roll - sin_yaw * cos_roll,
-         cos_yaw * sin_pitch * cos_roll + sin_yaw * sin_roll},
-        {sin_yaw * cos_pitch, sin_yaw * sin_pitch * sin_roll + cos_yaw * cos_roll,
-         sin_yaw * sin_pitch * cos_roll - cos_yaw * sin_roll},
-        {-sin_pitch, cos_pitch * sin_roll, cos_pitch * cos_roll}};
+    Eigen::Matrix3d R{{cos_yaw * cos_pitch, cos_yaw * sin_pitch * sin_roll - sin_yaw * cos_roll,
+                       cos_yaw * sin_pitch * cos_roll + sin_yaw * sin_roll},
+                      {sin_yaw * cos_pitch, sin_yaw * sin_pitch * sin_roll + cos_yaw * cos_roll,
+                       sin_yaw * sin_pitch * cos_roll - cos_yaw * sin_roll},
+                      {-sin_pitch, cos_pitch * sin_roll, cos_pitch * cos_roll}};
 
     return R;
 }
@@ -115,12 +123,9 @@ Eigen::MatrixXd xyz2ypd_jacobian(const Eigen::Vector3d& xyz) {
     auto dyaw_dy = x / (x * x + y * y);
     auto dyaw_dz = 0.0;
 
-    auto dpitch_dx =
-        -(x * z) / ((z * z / (x * x + y * y) + 1) * std::pow((x * x + y * y), 1.5));
-    auto dpitch_dy =
-        -(y * z) / ((z * z / (x * x + y * y) + 1) * std::pow((x * x + y * y), 1.5));
-    auto dpitch_dz =
-        1 / ((z * z / (x * x + y * y) + 1) * std::pow((x * x + y * y), 0.5));
+    auto dpitch_dx = -(x * z) / ((z * z / (x * x + y * y) + 1) * std::pow((x * x + y * y), 1.5));
+    auto dpitch_dy = -(y * z) / ((z * z / (x * x + y * y) + 1) * std::pow((x * x + y * y), 1.5));
+    auto dpitch_dz = 1 / ((z * z / (x * x + y * y) + 1) * std::pow((x * x + y * y), 0.5));
 
     auto ddistance_dx = x / std::pow((x * x + y * y + z * z), 0.5);
     auto ddistance_dy = y / std::pow((x * x + y * y + z * z), 0.5);
@@ -167,9 +172,8 @@ Eigen::MatrixXd ypd2xyz_jacobian(const Eigen::Vector3d& ypd) {
     return J;
 }
 
-double delta_time(
-    const std::chrono::steady_clock::time_point& a,
-    const std::chrono::steady_clock::time_point& b) {
+double delta_time(const std::chrono::steady_clock::time_point& a,
+                  const std::chrono::steady_clock::time_point& b) {
     std::chrono::duration<double> c = a - b;
     return c.count();
 }
@@ -190,4 +194,4 @@ double limit_min_max(double input, double min, double max) {
     return input;
 }
 
-}  // namespace tools
+} // namespace tools

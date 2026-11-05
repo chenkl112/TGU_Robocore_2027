@@ -10,7 +10,7 @@
 namespace tools {
 
 class ExtendedKalmanFilter {
-public:
+  public:
     Eigen::VectorXd x;
     Eigen::MatrixXd P;
 
@@ -23,9 +23,8 @@ public:
 
     Eigen::VectorXd predict(const Eigen::MatrixXd& F, const Eigen::MatrixXd& Q);
 
-    Eigen::VectorXd predict(
-        const Eigen::MatrixXd& F, const Eigen::MatrixXd& Q,
-        std::function<Eigen::VectorXd(const Eigen::VectorXd&)> f);
+    Eigen::VectorXd predict(const Eigen::MatrixXd& F, const Eigen::MatrixXd& Q,
+                            std::function<Eigen::VectorXd(const Eigen::VectorXd&)> f);
 
     Eigen::VectorXd update(
         const Eigen::VectorXd& z, const Eigen::MatrixXd& H, const Eigen::MatrixXd& R,
@@ -41,17 +40,13 @@ public:
     std::map<std::string, double> data;
     std::deque<int> recent_nis_failures{0};
     size_t window_size = 100;
-    double last_nis;
+    double last_nis = 0.0;
 
-private:
+  private:
     Eigen::MatrixXd I;
     std::function<Eigen::VectorXd(const Eigen::VectorXd&, const Eigen::VectorXd&)> x_add;
-
-    int nees_count_ = 0;
-    int nis_count_ = 0;
-    int total_count_ = 0;
 };
 
-}  // namespace tools
+} // namespace tools
 
-#endif  // TGU_ROBOCORE_2027_EXTENDED_KALMAN_FILTER_HPP
+#endif // TGU_ROBOCORE_2027_EXTENDED_KALMAN_FILTER_HPP

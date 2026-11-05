@@ -1,34 +1,35 @@
 //
-// Created by Interweave on 2026/4/10.
+// 由 Interweave 创建于 2026/4/10。
 //
 
 #ifndef TGU_ROBOCORE_2027_SERIAL_HPP
 #define TGU_ROBOCORE_2027_SERIAL_HPP
 
 #pragma once
-#include <utility>
 #include <boost/asio.hpp>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <type_traits>
+#include <utility>
 #include <vector>
-#include <cstring>
 
 namespace io {
 
 // ==================== RingBuffer ====================
-template<size_t N>
-class RingBuffer {
-public:
+template <size_t N> class RingBuffer {
+  public:
     void push(uint8_t byte) {
         buffer_[write_] = byte;
         write_ = (write_ + 1) % N;
 
-        if (size_ < N) size_++;
-        else read_ = (read_ + 1) % N;
+        if (size_ < N)
+            size_++;
+        else
+            read_ = (read_ + 1) % N;
     }
 
     uint8_t at(size_t idx) const {
@@ -40,9 +41,11 @@ public:
         size_ -= n;
     }
 
-    size_t size() const { return size_; }
+    size_t size() const {
+        return size_;
+    }
 
-private:
+  private:
     uint8_t buffer_[N];
     size_t read_ = 0;
     size_t write_ = 0;
@@ -50,9 +53,8 @@ private:
 };
 
 // ==================== Parser ====================
-template<typename T, size_t N = 2048>
-class StructParser {
-public:
+template <typename T, size_t N = 2048> class StructParser {
+  public:
     static_assert(std::is_trivially_copyable_v<T>, "Serial packets must be trivially copyable");
     static_assert(sizeof(T) >= 2 && sizeof(T) <= N, "Packet must fit the parser buffer");
 
@@ -63,7 +65,9 @@ public:
         std::memcpy(head_, &dummy, HEAD_SIZE);
     }
 
-    void reset() { buffer_ = RingBuffer<N>{}; }
+    void reset() {
+        buffer_ = RingBuffer<N>{};
+    }
 
     bool input(uint8_t byte, T& out) {
         buffer_.push(byte);
@@ -76,7 +80,8 @@ public:
                 continue;
             }
 
-            if (buffer_.size() < sizeof(T)) return false;
+            if (buffer_.size() < sizeof(T))
+                return false;
 
             // 拷贝数据
             uint8_t temp[sizeof(T)];
@@ -87,7 +92,7 @@ public:
             std::memcpy(&out, temp, sizeof(T));
 
             if (!validate_(out)) {
-                // Keep the suffix: a valid frame can start inside this false candidate.
+                // 只移走一个字节，合法帧可能从伪帧头候选的中间开始。
                 buffer_.pop(1);
                 continue;
             }
@@ -97,17 +102,18 @@ public:
         return false;
     }
 
-private:
+  private:
     static constexpr size_t HEAD_SIZE = 2;
 
     bool match_head() {
         for (size_t i = 0; i < HEAD_SIZE; i++) {
-            if (buffer_.at(i) != head_[i]) return false;
+            if (buffer_.at(i) != head_[i])
+                return false;
         }
         return true;
     }
 
-private:
+  private:
     std::function<bool(const T&)> validate_;
     RingBuffer<N> buffer_;
     uint8_t head_[HEAD_SIZE];
@@ -115,7 +121,7 @@ private:
 
 // ==================== Serial ====================
 class Serial {
-public:
+  public:
     Serial();
     ~Serial();
 
@@ -123,16 +129,23 @@ public:
     void close();
     bool is_open() const;
 
-    size_t write(const uint8_t* data, size_t size);
+    using WriteAttempt = std::function<void()>;
+    // 每次非阻塞写入前执行守卫。守卫可持上层状态锁，并同步调用一次 attempt。
+    // 返回 false 表示撤销：已写部分帧时关闭本次连接，避免后续指令续接到残帧。
+    // 守卫不得保存 attempt，也不得递归调用 write；串口锁在调用守卫前尚未持有。
+    using WriteGuard = std::function<bool(size_t sent, const WriteAttempt& attempt)>;
+    // 同连接按调用取得发送权的顺序串行写入；取得发送权后最多等待 250 ms。
+    // 返回实际写入字节数，超时或不可恢复的错误会关闭本次连接。
+    size_t write(const uint8_t* data, size_t size, const WriteGuard& guard = {});
 
-    template<typename T>
-    size_t send(const T& data) {
+    template <typename T> size_t send(const T& data) {
         return write(reinterpret_cast<const uint8_t*>(&data), sizeof(T));
     }
 
-    template<typename T>
-    void recv(std::function<void(const T&)> cb,
-              std::function<bool(const T&)> validate = [](const T&) { return true; }) {
+    template <typename T>
+    void recv(
+        std::function<void(const T&)> cb,
+        std::function<bool(const T&)> validate = [](const T&) { return true; }) {
         struct Receiver {
             StructParser<T> parser;
             uint64_t session = 0;
@@ -141,14 +154,14 @@ public:
         auto receiver = std::make_shared<Receiver>();
         receiver->callback = std::move(cb);
         receiver->parser = StructParser<T>{std::move(validate)};
-        auto wrapper = [this, receiver](
-                           const uint8_t* data, size_t len, uint64_t session) {
+        auto wrapper = [this, receiver](const uint8_t* data, size_t len, uint64_t session) {
             if (receiver->session != session) {
                 receiver->parser.reset();
                 receiver->session = session;
             }
             for (size_t i = 0; i < len; i++) {
-                if (!is_current_session(session)) return;
+                if (!is_current_session(session))
+                    return;
                 T pkt;
                 if (receiver->parser.input(data[i], pkt)) {
                     receiver->callback(pkt);
@@ -162,7 +175,7 @@ public:
 
     void spin_once();
 
-private:
+  private:
     boost::asio::io_context io_;
     boost::asio::serial_port serial_;
     mutable std::mutex state_mutex_;
@@ -183,4 +196,4 @@ private:
 
 } // namespace io
 
-#endif //TGU_ROBOCORE_2027_SERIAL_HPP
+#endif // TGU_ROBOCORE_2027_SERIAL_HPP

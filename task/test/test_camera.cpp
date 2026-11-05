@@ -1,5 +1,5 @@
 //
-// Created by tgu on 2026/4/16.
+// 由 tgu 创建于 2026/4/16。
 //
 
 #include <arv.h>
@@ -93,8 +93,8 @@ int main() {
         g_object_unref(buffer);
     } else {
         if (buffer) {
-            std::cout << "Failed to get frame, status = "
-                      << arv_buffer_get_status(buffer) << std::endl;
+            std::cout << "Failed to get frame, status = " << arv_buffer_get_status(buffer)
+                      << std::endl;
             g_object_unref(buffer);
         } else {
             std::cout << "Failed to get frame: timeout\n";

@@ -16,27 +16,28 @@
 
 namespace {
 namespace fs = std::filesystem;
-using tools::LogLevel;
 using tools::Logger;
 using tools::LoggerConfig;
+using tools::LogLevel;
 
-void require(bool condition, const std::string &message) {
-    // Unlike assert(), these checks also run in Release builds.
-    if (!condition) throw std::runtime_error(message);
+void require(bool condition, const std::string& message) {
+    // 这些检查在 Release 下也执行，不受 NDEBUG 对 assert 的影响。
+    if (!condition)
+        throw std::runtime_error(message);
 }
 
 void stop_logging() {
-    Logger::instance().init({.level = LogLevel::Off,
-                             .enable_console = false,
-                             .enable_file = false});
+    Logger::instance().init(
+        {.level = LogLevel::Off, .enable_console = false, .enable_file = false});
 }
 
 class TempLogs {
-public:
+  public:
     TempLogs() {
         std::random_device random;
         for (int attempt = 0; attempt < 100; ++attempt) {
-            auto candidate = fs::temp_directory_path() /
+            auto candidate =
+                fs::temp_directory_path() /
                 ("robocore-logger-" + std::to_string(random()) + "-" + std::to_string(random()));
             if (fs::create_directory(candidate)) {
                 directory_ = std::move(candidate);
@@ -52,7 +53,9 @@ public:
         fs::remove_all(directory_, ignored);
     }
 
-    fs::path path(std::string_view name) const { return directory_ / name; }
+    fs::path path(std::string_view name) const {
+        return directory_ / name;
+    }
 
     LoggerConfig config(std::string_view name) const {
         return {.level = LogLevel::Debug,
@@ -61,15 +64,15 @@ public:
                 .file_path = path(name).string()};
     }
 
-private:
+  private:
     fs::path directory_;
 };
 
-// Only installed while no worker threads exist; workers never redirect streams.
+// 只在没有工作线程时替换流缓冲区，工作线程不修改输出目标。
 class CaptureConsole {
-public:
-    CaptureConsole() : old_out_(std::cout.rdbuf(out.rdbuf())),
-                       old_err_(std::cerr.rdbuf(err.rdbuf())) {}
+  public:
+    CaptureConsole()
+        : old_out_(std::cout.rdbuf(out.rdbuf())), old_err_(std::cerr.rdbuf(err.rdbuf())) {}
     ~CaptureConsole() {
         std::cout.rdbuf(old_out_);
         std::cerr.rdbuf(old_err_);
@@ -78,12 +81,12 @@ public:
     std::ostringstream out;
     std::ostringstream err;
 
-private:
-    std::streambuf *old_out_;
-    std::streambuf *old_err_;
+  private:
+    std::streambuf* old_out_;
+    std::streambuf* old_err_;
 };
 
-std::string read_file(const fs::path &path) {
+std::string read_file(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
     require(input.is_open(), "Cannot read " + path.string());
     std::string contents{std::istreambuf_iterator<char>(input), {}};
@@ -91,7 +94,7 @@ std::string read_file(const fs::path &path) {
     return contents;
 }
 
-std::vector<std::string> messages(const std::string &contents) {
+std::vector<std::string> messages(const std::string& contents) {
     require(contents.empty() || contents.back() == '\n', "Incomplete final log line");
     static const std::regex line_pattern(
         R"(^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\] \[(DEBUG|INFO |WARN |ERROR)\] \[INFRA\] \[(fixture\.cpp:42|logger_tests\.cpp:[0-9]+)\] (.*)$)");
@@ -99,8 +102,9 @@ std::vector<std::string> messages(const std::string &contents) {
     std::istringstream lines(contents);
     std::string line;
     while (std::getline(lines, line)) {
-        // Text-mode output on Windows uses CRLF.
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Windows 文本输出使用 CRLF 换行。
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
         std::smatch match;
         require(std::regex_match(line, match, line_pattern), "Malformed log line: " + line);
         result.push_back(match[3].str());
@@ -108,11 +112,11 @@ std::vector<std::string> messages(const std::string &contents) {
     return result;
 }
 
-void expect_file(const fs::path &path, const std::vector<std::string> &expected) {
+void expect_file(const fs::path& path, const std::vector<std::string>& expected) {
     require(messages(read_file(path)) == expected, "Unexpected records in " + path.string());
 }
 
-void emit(const std::string &message, LogLevel level = LogLevel::Info) {
+void emit(const std::string& message, LogLevel level = LogLevel::Info) {
     Logger::instance().log(level, "INFRA", message, "/virtual/path/fixture.cpp", 42);
 }
 
@@ -134,7 +138,7 @@ void switch_file() {
     Logger::instance().init(logs.config("a.log"));
     emit("only-a");
     Logger::instance().init(logs.config("b.log"));
-    // Switching must flush and close A immediately.
+    // 切换日志文件时必须立即刷新并关闭 A。
     expect_file(logs.path("a.log"), {"only-a"});
     emit("only-b");
     stop_logging();
@@ -176,7 +180,8 @@ void invalid_path() {
     require(messages(console.out.str()) == std::vector<std::string>{"console-still-works"},
             "Console logging failed after invalid file path");
     expect_file(logs.path("old.log"), {"before-failure"});
-    require(!fs::exists(logs.path("missing-parent/invalid.log")), "Invalid file unexpectedly exists");
+    require(!fs::exists(logs.path("missing-parent/invalid.log")),
+            "Invalid file unexpectedly exists");
     Logger::instance().init(logs.config("recovered.log"));
     emit("recovered");
     stop_logging();
@@ -186,8 +191,8 @@ void invalid_path() {
 
 void levels() {
     TempLogs logs;
-    constexpr std::array levels{LogLevel::Debug, LogLevel::Info, LogLevel::Warn,
-                                LogLevel::Error, LogLevel::Off};
+    constexpr std::array levels{LogLevel::Debug, LogLevel::Info, LogLevel::Warn, LogLevel::Error,
+                                LogLevel::Off};
     constexpr std::array names{"DEBUG", "INFO ", "WARN ", "ERROR"};
     for (std::size_t threshold = 0; threshold < levels.size(); ++threshold) {
         CaptureConsole console;
@@ -232,7 +237,8 @@ void concurrent() {
                 for (int round = 0; round < rounds; ++round) {
                     phase.arrive_and_wait();
                     for (int record = 0; record < per_round; ++record) {
-                        emit(std::format("writer-{}-record-{}", writer, round * per_round + record));
+                        emit(
+                            std::format("writer-{}-record-{}", writer, round * per_round + record));
                     }
                     phase.arrive_and_wait();
                 }
@@ -242,14 +248,13 @@ void concurrent() {
             auto updated = config;
             for (int round = 0; round < rounds; ++round) {
                 phase.arrive_and_wait();
-                // Both thresholds accept every INFO record; changing the threshold
-                // also exercises synchronization of configuration reads and writes.
+                // 两个门限都保留 INFO 日志；切换门限同时检查配置读写的同步。
                 updated.level = round % 2 ? LogLevel::Debug : LogLevel::Info;
                 Logger::instance().init(updated);
                 phase.arrive_and_wait();
             }
         });
-    } // Join every worker before closing or reading the file.
+    } // 关闭或读取文件前先等待全部工作线程退出。
     stop_logging();
     const auto records = messages(read_file(logs.path("concurrent.log")));
     require(records.size() == writers * rounds * per_round, "Missing or extra concurrent records");
@@ -259,7 +264,7 @@ void concurrent() {
             remaining.insert(std::format("writer-{}-record-{}", writer, record));
         }
     }
-    for (const auto &record : records) {
+    for (const auto& record : records) {
         require(remaining.erase(record) == 1, "Duplicate or unexpected record: " + record);
     }
     require(remaining.empty(), "Concurrent records are missing");
@@ -284,21 +289,29 @@ void debug_macro() {
 }
 } // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     try {
         require(argc == 2, "Usage: logger_tests <scenario>");
         const std::string_view scenario(argv[1]);
-        if (scenario == "reinitialize") reinitialize();
-        else if (scenario == "switch_file") switch_file();
-        else if (scenario == "toggle_file") toggle_file();
-        else if (scenario == "invalid_path") invalid_path();
-        else if (scenario == "levels") levels();
-        else if (scenario == "concurrent") concurrent();
-        else if (scenario == "debug_macro") debug_macro();
-        else throw std::runtime_error("Unknown scenario: " + std::string(scenario));
+        if (scenario == "reinitialize")
+            reinitialize();
+        else if (scenario == "switch_file")
+            switch_file();
+        else if (scenario == "toggle_file")
+            toggle_file();
+        else if (scenario == "invalid_path")
+            invalid_path();
+        else if (scenario == "levels")
+            levels();
+        else if (scenario == "concurrent")
+            concurrent();
+        else if (scenario == "debug_macro")
+            debug_macro();
+        else
+            throw std::runtime_error("Unknown scenario: " + std::string(scenario));
         std::cout << "PASS " << scenario << '\n';
         return 0;
-    } catch (const std::exception &error) {
+    } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;
     }

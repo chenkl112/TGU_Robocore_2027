@@ -1,0 +1,119 @@
+name: C++ checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  format:
+    name: clang-format 23.1.5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned formatter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-venv
+          python3 -m venv "$RUNNER_TEMP/format-env"
+          "$RUNNER_TEMP/format-env/bin/python" -m pip install clang-format==23.1.5
+      - name: Check project sources
+        run: >-
+          python3 tools/check_format.py --check
+          --clang-format "$RUNNER_TEMP/format-env/bin/clang-format"
+
+  release:
+    name: Release models, PTY, and replay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build g++ \
+            python3-venv python3-pip libboost-all-dev libopencv-dev libeigen3-dev
+      - name: Install the pinned inference runtime
+        run: |
+          python3 -m venv .venv-openvino
+          .venv-openvino/bin/python -m pip install -r requirements-openvino.txt
+      - name: Configure Release
+        run: cmake -S . -B build/full -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build/full -j2
+      - name: Test real models and process lifecycles
+        run: ctest --test-dir build/full --output-on-failure -j2
+      - name: Keep failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-test-logs
+          path: build/full/Testing/Temporary/*.log
+          if-no-files-found: ignore
+
+  core:
+    name: Debug core without inference or devices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install core dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build g++ \
+            libopencv-dev libeigen3-dev
+      - name: Configure isolated core
+        run: >-
+          cmake -S . -B build/core -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+          -DROBOCORE_WITH_VISION=OFF -DROBOCORE_WITH_IO=OFF -DROBOCORE_WITH_FOXGLOVE=OFF
+          -DCMAKE_DISABLE_FIND_PACKAGE_OpenVINO=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_Boost=TRUE
+          -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=TRUE
+      - name: Build
+        run: cmake --build build/core -j2
+      - name: Test
+        run: ctest --test-dir build/core --output-on-failure -j2
+      - name: Keep failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-logs
+          path: build/core/Testing/Temporary/*.log
+          if-no-files-found: ignore
+
+  io-sanitizers:
+    name: I/O AddressSanitizer and UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install I/O dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build g++ \
+            libboost-all-dev libeigen3-dev
+      - name: Configure instrumented I/O
+        run: >-
+          cmake -S tests/io -B build/io-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DIO_SANITIZER=address
+      - name: Build
+        run: cmake --build build/io-asan -j2
+      - name: Test shared production libraries with sanitizers
+        run: ctest --test-dir build/io-asan --output-on-failure -j2
+      - name: Keep failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: io-sanitizer-test-logs
+          path: build/io-asan/Testing/Temporary/*.log
+          if-no-files-found: ignore

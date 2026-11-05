@@ -1,26 +1,35 @@
-# test
-add_executable(read_toml test/read_toml.cpp)
-add_executable(test_serial test/test_serial.cpp)
-add_executable(test_logger test/test_logger.cpp)
-add_executable(test_foxglove test/test_foxglove.cpp)
-add_executable(test_camera test/test_camera.cpp)
-add_executable(auto_aim_test test/auto_aim_test.cpp)
-add_executable(planner_test test/planner_test.cpp)
-add_executable(auto_aim_sentry auto_aim_sentry.cpp)
+if(ROBOCORE_BUILD_DEMOS)
+    add_executable(read_toml test/read_toml.cpp)
+    target_link_libraries(read_toml PRIVATE robocore_base)
+    add_executable(test_logger test/test_logger.cpp)
+    target_link_libraries(test_logger PRIVATE robocore_base)
+    add_executable(planner_test test/planner_test.cpp)
+    target_link_libraries(planner_test PRIVATE auto_aim_core)
+    if(TARGET robocore_serial)
+        add_executable(test_serial test/test_serial.cpp)
+        target_link_libraries(test_serial PRIVATE robocore_serial)
+    endif()
+    if(TARGET robocore_foxglove)
+        add_executable(test_foxglove test/test_foxglove.cpp)
+        target_link_libraries(test_foxglove PRIVATE robocore_foxglove)
+    endif()
+endif()
 
-target_link_libraries(test_serial PRIVATE io tools)
-target_link_libraries(test_logger PRIVATE tools)
-target_link_libraries(test_foxglove PRIVATE tools)
-target_link_libraries(test_camera PRIVATE ${ARAVIS_LIBRARIES} ${OpenCV_LIBS})
-target_link_libraries(
-        auto_aim_test
-        PRIVATE auto_aim io tools ${OpenCV_LIBS} Eigen3::Eigen Threads::Threads
-)
-target_link_libraries(
-        planner_test
-        PRIVATE auto_aim tools ${OpenCV_LIBS} Eigen3::Eigen Threads::Threads
-)
-target_link_libraries(
-        auto_aim_sentry
-        PRIVATE auto_aim io tools ${OpenCV_LIBS} Eigen3::Eigen Threads::Threads
-)
+# Aravis 只服务于相机演示；正式自瞄与算法测试不需要安装它。
+if(ROBOCORE_BUILD_CAMERA_DEMO)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(ARAVIS REQUIRED IMPORTED_TARGET aravis-0.8)
+    find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui)
+    add_executable(test_camera test/test_camera.cpp)
+    target_link_libraries(test_camera PRIVATE robocore_base PkgConfig::ARAVIS
+        opencv_core opencv_imgproc opencv_highgui)
+endif()
+
+if(TARGET auto_aim_vision)
+    add_executable(auto_aim_test test/auto_aim_test.cpp)
+    target_link_libraries(auto_aim_test PRIVATE auto_aim_vision)
+    if(TARGET robocore_gimbal AND TARGET robocore_camera)
+        add_executable(auto_aim_sentry auto_aim_sentry.cpp auto_aim_runtime.cpp)
+        target_link_libraries(auto_aim_sentry PRIVATE auto_aim_vision robocore_gimbal robocore_camera)
+    endif()
+endif()

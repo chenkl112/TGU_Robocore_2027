@@ -1,58 +1,36 @@
-#ifndef TGU_ROBOCORE_2027_SOLVER_HPP
-#define TGU_ROBOCORE_2027_SOLVER_HPP
 #pragma once
 
-#include <Eigen/Dense>
-#include <Eigen/Geometry>
-#include <opencv2/core/eigen.hpp>
+#include "armor_geometry.hpp"
+#include "config.hpp"
 #include <optional>
 #include <string>
-#include <vector>
-
-#include "armor.hpp"
 
 namespace app::auto_aim {
 
+// Solver 负责尺寸假设和歧义策略；坐标变换、PnP 与物理模型拟合由 ArmorGeometry 完成。
 class Solver {
-public:
+  public:
     explicit Solver(const std::string& config_path);
+    Solver(const CalibrationConfig& calibration, const SolverConfig& config);
 
     Eigen::Matrix3d R_gimbal2world() const;
-
     void set_R_gimbal2world(const Eigen::Quaterniond& q);
-
+    // 已知物理尺寸的几何接口，不执行尺寸歧义或最大残差筛选；生产跟踪使用下面的只读接口。
     bool solve(Armor& armor) const;
-    // Resolve a detector observation using calibrated size hypotheses. A prior
-    // only breaks an ambiguous size tie; the caller must still associate in 3D.
-    bool solve_observation(
-        Armor& armor, std::optional<ArmorType> tracked_type = std::nullopt) const;
+    std::optional<SolvedObservation>
+    resolve_observation(const Armor& detection,
+                        std::optional<ArmorType> tracked_type = std::nullopt) const;
+    // 跟踪尺寸只能打破几何歧义，调用方仍须检查与原轨迹的三维关联。
+    bool solve_observation(Armor& armor,
+                           std::optional<ArmorType> tracked_type = std::nullopt) const;
+    std::vector<cv::Point2f> reproject_armor(const Eigen::Vector3d& position, double yaw,
+                                             ArmorType type) const;
+    std::vector<cv::Point2f> world2pixel(const std::vector<cv::Point3f>& points) const;
 
-    std::vector<cv::Point2f> reproject_armor(
-        const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type) const;
-
-    std::vector<cv::Point2f> world2pixel(const std::vector<cv::Point3f>& worldPoints);
-
-private:
-    cv::Mat camera_matrix_;
-    cv::Mat distort_coeffs_;
-    Eigen::Matrix3d R_gimbal2imubody_;
-    Eigen::Matrix3d R_camera2gimbal_;
-    Eigen::Vector3d t_camera2gimbal_;
-    Eigen::Matrix3d R_gimbal2world_;
-    double max_reprojection_error_ = 3.0;
-    double min_type_error_gap_ = 0.25;
-    double size_noise_floor_ = 1.5;
-    double max_balance_pitch_ = 60.0 * CV_PI / 180.0;
-
-    bool solve_pose(Armor& armor, double& reprojection_error, bool refine = false) const;
-    bool solve_size_pose(Armor& armor, double& reprojection_error, bool allow_small_tilt = false) const;
-    bool finish_pose(Armor& armor) const;
-
-    void optimize_yaw(Armor& armor) const;
-
-    double armor_reprojection_error(const Armor& armor, double yaw) const;
+  private:
+    explicit Solver(const SolverSettings& bundle);
+    SolverConfig config_;
+    ArmorGeometry geometry_;
 };
 
-}  // namespace app::auto_aim
-
-#endif  // TGU_ROBOCORE_2027_SOLVER_HPP
+} // namespace app::auto_aim

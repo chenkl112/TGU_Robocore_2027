@@ -16,4 +16,4 @@ std::size_t Voter::index(const Color color, const ArmorName name, const ArmorTyp
     return color * (ARMOR_NAMES.size() * ARMOR_TYPES.size()) + name * ARMOR_TYPES.size() + type;
 }
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim

@@ -1,0 +1,172 @@
+审查基线：e454a1819cc19f1bbf1b16becebb217b35585766
+验证对象：基线加本轮整改；下方源码摘要标识接受验证的源码与配置。
+源码/配置清单 SHA-256：e8ee66ffe0c047684e5c96f89f568a1371d0f98168f4150c8cf01231b5842466
+范围：C/C++、Python、TOML、CMake、工作流、格式配置和 OpenVINO 依赖声明（不含文档）。
+环境：Linux / GCC 13.3 / CMake 3.28.3 / OpenCV 4.6 / OpenVINO 2026.3
+格式检查：96 个自有 C++ 文件通过 clang-format 23.1.5。
+GitHub 工作流已配置，未在远端运行。
+TSan 环境检查：exit 66，unexpected memory mapping，未执行测试。
+
+完整 Release
+ 1/83 Test #53: auto_aim.planner_rotating_geometry .....   Passed    3.91 sec
+ 2/83 Test #25: gimbal.silent_start ....................   Passed    3.01 sec
+ 3/83 Test #52: auto_aim.planner_rotating_sequence .....   Passed    1.68 sec
+ 4/83 Test #74: auto_aim.vision_pipeline ...............   Passed    1.30 sec
+ 5/83 Test #71: auto_aim.worker_failure ................   Passed    0.48 sec
+ 6/83 Test #73: auto_aim.model_keypoint_contract .......   Passed    0.46 sec
+ 7/83 Test #70: auto_aim.config ........................   Passed    0.48 sec
+ 8/83 Test #31: gimbal.reconnect .......................   Passed    0.34 sec
+ 9/83 Test #27: gimbal.feedback_timeout ................   Passed    0.28 sec
+10/83 Test #66: auto_aim.camera_timeout ................   Passed    0.27 sec
+11/83 Test #23: serial.concurrent ......................   Passed    0.26 sec
+12/83 Test #18: serial.write_timeout ...................   Passed    0.25 sec
+13/83 Test #33: gimbal.backpressure_timeout ............   Passed    0.23 sec
+14/83 Test #35: gimbal.backpressure_deadline ...........   Passed    0.21 sec
+15/83 Test #28: gimbal.pose_history ....................   Passed    0.19 sec
+16/83 Test #26: gimbal.idle_shutdown ...................   Passed    0.15 sec
+17/83 Test #32: gimbal.backpressure_mode ...............   Passed    0.14 sec
+18/83 Test #34: gimbal.backpressure_alignment ..........   Passed    0.14 sec
+19/83 Test #29: gimbal.mode_session ....................   Passed    0.13 sec
+20/83 Test #58: auto_aim.lost_target_fire ..............   Passed    0.10 sec
+21/83 Test #54: auto_aim.planner_solve_recovery ........   Passed    0.11 sec
+22/83 Test #68: auto_aim.yaw_optimization ..............   Passed    0.08 sec
+23/83 Test  #8: infra.channels .........................   Passed    0.09 sec
+24/83 Test #30: gimbal.feedback_alignment ..............   Passed    0.09 sec
+25/83 Test #43: auto_aim.feedback_alignment ............   Passed    0.08 sec
+26/83 Test #50: auto_aim.planner_acceleration_bounds ...   Passed    0.07 sec
+27/83 Test #63: auto_aim.planner_time_contract .........   Passed    0.07 sec
+28/83 Test #48: auto_aim.observation_expiry ............   Passed    0.07 sec
+29/83 Test #44: auto_aim.perspective_keypoints .........   Passed    0.06 sec
+30/83 Test #49: auto_aim.moving_intercept ..............   Passed    0.06 sec
+31/83 Test #39: auto_aim.tracking_confirmation .........   Passed    0.06 sec
+32/83 Test #47: auto_aim.shooter_alignment .............   Passed    0.06 sec
+33/83 Test #65: auto_aim.tracker_snapshot ..............   Passed    0.06 sec
+34/83 Test #56: auto_aim.mpc_objective .................   Passed    0.05 sec
+35/83 Test #51: auto_aim.planner_failed_solve ..........   Passed    0.06 sec
+36/83 Test #41: auto_aim.association_gate ..............   Passed    0.06 sec
+37/83 Test #55: auto_aim.planner_visible_intercept .....   Passed    0.06 sec
+38/83 Test #62: auto_aim.prediction_time_contract ......   Passed    0.06 sec
+39/83 Test #64: auto_aim.planner_stop_reasons ..........   Passed    0.06 sec
+40/83 Test #60: auto_aim.calibration_validation ........   Passed    0.06 sec
+41/83 Test #57: auto_aim.invalid_numeric ...............   Passed    0.06 sec
+42/83 Test #61: auto_aim.trajectory ....................   Passed    0.06 sec
+43/83 Test #40: auto_aim.priority_switch ...............   Passed    0.06 sec
+44/83 Test #45: auto_aim.tilted_keypoints ..............   Passed    0.07 sec
+45/83 Test #42: auto_aim.planner_expiry ................   Passed    0.06 sec
+46/83 Test #59: auto_aim.pose_validation ...............   Passed    0.06 sec
+47/83 Test #46: auto_aim.fire_without_feedback .........   Passed    0.06 sec
+48/83 Test #20: serial.queued_write ....................   Passed    0.05 sec
+49/83 Test #19: serial.close_write .....................   Passed    0.05 sec
+50/83 Test #10: serial.close_read ......................   Passed    0.05 sec
+51/83 Test  #9: serial.read_timeout ....................   Passed    0.05 sec
+52/83 Test #17: serial.disconnect ......................   Passed    0.05 sec
+53/83 Test #36: gimbal.reconnect_shutdown ..............   Passed    0.04 sec
+54/83 Test  #6: logger.concurrent ......................   Passed    0.01 sec
+55/83 Test #69: auto_aim.shooter_current_command .......   Passed    0.00 sec
+56/83 Test  #4: logger.invalid_path ....................   Passed    0.00 sec
+57/83 Test  #1: logger.reinitialize ....................   Passed    0.00 sec
+58/83 Test #24: serial.guarded_cancel ..................   Passed    0.00 sec
+59/83 Test  #3: logger.toggle_file .....................   Passed    0.00 sec
+60/83 Test  #2: logger.switch_file .....................   Passed    0.00 sec
+61/83 Test  #5: logger.levels ..........................   Passed    0.00 sec
+62/83 Test  #7: logger.debug_macro .....................   Passed    0.00 sec
+63/83 Test #11: serial.fragmented ......................   Passed    0.00 sec
+64/83 Test #12: serial.subscriptions ...................   Passed    0.00 sec
+65/83 Test #21: serial.callback_close ..................   Passed    0.00 sec
+66/83 Test #13: serial.false_header ....................   Passed    0.00 sec
+67/83 Test #16: serial.failed_open .....................   Passed    0.00 sec
+68/83 Test #22: serial.callback_throw ..................   Passed    0.00 sec
+69/83 Test #14: serial.isolated_ports ..................   Passed    0.00 sec
+70/83 Test #15: serial.reopen ..........................   Passed    0.00 sec
+71/83 Test #37: gimbal.pose_cancel .....................   Passed    0.11 sec
+72/83 Test #38: gimbal.config_duration_bounds ..........   Passed    0.00 sec
+73/83 Test #72: auto_aim.worker_lifecycle ..............   Passed    1.30 sec
+74/83 Test #67: auto_aim.armor_type ....................   Passed   19.05 sec
+75/83 Test #83: runtime.replay_invalid_records .........   Passed    6.39 sec
+76/83 Test #78: runtime.network_camera_silence .........   Passed    2.48 sec
+77/83 Test #79: runtime.positive_target_recovery .......   Passed    1.87 sec
+78/83 Test #81: runtime.replay_deterministic ...........   Passed    1.69 sec
+79/83 Test #77: runtime.missing_camera .................   Passed    1.07 sec
+80/83 Test #76: runtime.signal_shutdown ................   Passed    1.01 sec
+81/83 Test #82: runtime.replay_positive_seek ...........   Passed    0.90 sec
+82/83 Test #75: runtime.replay_seek ....................   Passed    0.58 sec
+83/83 Test #80: runtime.pose_wait_shutdown .............   Passed    1.27 sec
+100% tests passed, 0 tests failed out of 83
+Total Test time (real) =  36.33 sec
+
+隔离核心 Debug
+ 1/39 Test #22: auto_aim.planner_rotating_sequence .....   Passed   30.89 sec
+ 2/39 Test #23: auto_aim.planner_rotating_geometry .....   Passed   77.10 sec
+ 3/39 Test #24: auto_aim.planner_solve_recovery ........   Passed    1.25 sec
+ 4/39 Test #37: auto_aim.yaw_optimization ..............   Passed    0.41 sec
+ 5/39 Test #20: auto_aim.planner_acceleration_bounds ...   Passed    0.42 sec
+ 6/39 Test #28: auto_aim.lost_target_fire ..............   Passed    0.41 sec
+ 7/39 Test #13: auto_aim.feedback_alignment ............   Passed    0.15 sec
+ 8/39 Test #33: auto_aim.planner_time_contract .........   Passed    0.14 sec
+ 9/39 Test #18: auto_aim.observation_expiry ............   Passed    0.10 sec
+10/39 Test #34: auto_aim.planner_stop_reasons ..........   Passed    0.11 sec
+11/39 Test #21: auto_aim.planner_failed_solve ..........   Passed    0.11 sec
+12/39 Test  #8: infra.channels .........................   Passed    0.09 sec
+13/39 Test #14: auto_aim.perspective_keypoints .........   Passed    0.07 sec
+14/39 Test #15: auto_aim.tilted_keypoints ..............   Passed    0.06 sec
+15/39 Test  #6: logger.concurrent ......................   Passed    0.04 sec
+16/39 Test #19: auto_aim.moving_intercept ..............   Passed    0.04 sec
+17/39 Test #25: auto_aim.planner_visible_intercept .....   Passed    0.04 sec
+18/39 Test #39: auto_aim.config ........................   Passed    0.03 sec
+19/39 Test #16: auto_aim.fire_without_feedback .........   Passed    0.03 sec
+20/39 Test #12: auto_aim.planner_expiry ................   Passed    0.03 sec
+21/39 Test #11: auto_aim.association_gate ..............   Passed    0.03 sec
+22/39 Test  #9: auto_aim.tracking_confirmation .........   Passed    0.03 sec
+23/39 Test #26: auto_aim.mpc_objective .................   Passed    0.02 sec
+24/39 Test #10: auto_aim.priority_switch ...............   Passed    0.02 sec
+25/39 Test #35: auto_aim.tracker_snapshot ..............   Passed    0.01 sec
+26/39 Test #29: auto_aim.pose_validation ...............   Passed    0.01 sec
+27/39 Test #38: auto_aim.shooter_current_command .......   Passed    0.01 sec
+28/39 Test #27: auto_aim.invalid_numeric ...............   Passed    0.01 sec
+29/39 Test #32: auto_aim.prediction_time_contract ......   Passed    0.00 sec
+30/39 Test #17: auto_aim.shooter_alignment .............   Passed    0.01 sec
+31/39 Test #30: auto_aim.calibration_validation ........   Passed    0.00 sec
+32/39 Test #31: auto_aim.trajectory ....................   Passed    0.00 sec
+33/39 Test  #1: logger.reinitialize ....................   Passed    0.00 sec
+34/39 Test  #2: logger.switch_file .....................   Passed    0.00 sec
+35/39 Test  #7: logger.debug_macro .....................   Passed    0.00 sec
+36/39 Test  #5: logger.levels ..........................   Passed    0.00 sec
+37/39 Test  #3: logger.toggle_file .....................   Passed    0.00 sec
+38/39 Test  #4: logger.invalid_path ....................   Passed    0.00 sec
+39/39 Test #36: auto_aim.armor_type ....................   Passed  145.89 sec
+100% tests passed, 0 tests failed out of 39
+Total Test time (real) = 176.78 sec
+
+共享 I/O ASan+UBSan
+ 1/30 Test #23: gimbal.reconnect .................   Passed    0.36 sec
+ 2/30 Test #19: gimbal.feedback_timeout ..........   Passed    0.29 sec
+ 3/30 Test #15: serial.concurrent ................   Passed    0.27 sec
+ 4/30 Test #10: serial.write_timeout .............   Passed    0.26 sec
+ 5/30 Test #25: gimbal.backpressure_timeout ......   Passed    0.24 sec
+ 6/30 Test #27: gimbal.backpressure_deadline .....   Passed    0.22 sec
+ 7/30 Test #20: gimbal.pose_history ..............   Passed    0.20 sec
+ 8/30 Test #18: gimbal.idle_shutdown .............   Passed    0.17 sec
+ 9/30 Test #24: gimbal.backpressure_mode .........   Passed    0.15 sec
+10/30 Test #26: gimbal.backpressure_alignment ....   Passed    0.15 sec
+11/30 Test #21: gimbal.mode_session ..............   Passed    0.14 sec
+12/30 Test #29: gimbal.pose_cancel ...............   Passed    0.12 sec
+13/30 Test #22: gimbal.feedback_alignment ........   Passed    0.10 sec
+14/30 Test #11: serial.close_write ...............   Passed    0.06 sec
+15/30 Test #12: serial.queued_write ..............   Passed    0.06 sec
+16/30 Test  #2: serial.close_read ................   Passed    0.06 sec
+17/30 Test #28: gimbal.reconnect_shutdown ........   Passed    0.05 sec
+18/30 Test  #9: serial.disconnect ................   Passed    0.06 sec
+19/30 Test #17: gimbal.silent_start ..............   Passed    3.02 sec
+20/30 Test  #8: serial.failed_open ...............   Passed    0.01 sec
+21/30 Test #16: serial.guarded_cancel ............   Passed    0.01 sec
+22/30 Test #30: gimbal.config_duration_bounds ....   Passed    0.01 sec
+23/30 Test  #1: serial.read_timeout ..............   Passed    0.06 sec
+24/30 Test  #7: serial.reopen ....................   Passed    0.01 sec
+25/30 Test  #5: serial.false_header ..............   Passed    0.01 sec
+26/30 Test  #6: serial.isolated_ports ............   Passed    0.01 sec
+27/30 Test #13: serial.callback_close ............   Passed    0.01 sec
+28/30 Test  #4: serial.subscriptions .............   Passed    0.01 sec
+29/30 Test  #3: serial.fragmented ................   Passed    0.01 sec
+30/30 Test #14: serial.callback_throw ............   Passed    0.01 sec
+100% tests passed, 0 tests failed out of 30
+Total Test time (real) =   3.10 sec

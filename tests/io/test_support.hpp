@@ -17,11 +17,12 @@ using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
 inline void require(bool condition, const std::string& message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition)
+        throw std::runtime_error(message);
 }
 
 class Pty {
-public:
+  public:
     Pty() {
         char name[128]{};
         require(::openpty(&master_, &slave_, name, nullptr, nullptr) == 0, "openpty failed");
@@ -38,15 +39,21 @@ public:
         }
     }
     ~Pty() {
-        if (master_ >= 0) ::close(master_);
+        if (master_ >= 0)
+            ::close(master_);
         ::close(slave_);
     }
     Pty(const Pty&) = delete;
     Pty& operator=(const Pty&) = delete;
-    const std::string& name() const { return name_; }
-    int master() const { return master_; }
+    const std::string& name() const {
+        return name_;
+    }
+    int master() const {
+        return master_;
+    }
     void disconnect() {
-        if (master_ >= 0) ::close(master_);
+        if (master_ >= 0)
+            ::close(master_);
         master_ = -1;
     }
     void send(const uint8_t* data, size_t size) const {
@@ -54,7 +61,8 @@ public:
         size_t sent = 0;
         while (sent < size && Clock::now() < deadline) {
             const auto count = ::write(master_, data + sent, size - sent);
-            if (count > 0) sent += static_cast<size_t>(count);
+            if (count > 0)
+                sent += static_cast<size_t>(count);
             else {
                 require(count < 0 && (errno == EAGAIN || errno == EINTR), "PTY write failed");
                 pollfd fd{master_, POLLOUT, 0};
@@ -69,7 +77,8 @@ public:
         size_t received = 0;
         while (received < size && Clock::now() < deadline) {
             const auto count = ::read(master_, result.data() + received, size - received);
-            if (count > 0) received += static_cast<size_t>(count);
+            if (count > 0)
+                received += static_cast<size_t>(count);
             else {
                 require(count < 0 && (errno == EAGAIN || errno == EINTR), "PTY read failed");
                 pollfd fd{master_, POLLIN, 0};
@@ -79,9 +88,10 @@ public:
         require(received == size, "PTY read timed out");
         return result;
     }
-private:
+
+  private:
     int master_ = -1;
     int slave_ = -1;
     std::string name_;
 };
-}  // namespace test
+} // namespace test

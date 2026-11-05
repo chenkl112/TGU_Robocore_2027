@@ -4,65 +4,66 @@
 #include <cstdint>
 #include <vector>
 
+#include "config.hpp"
 #include "tools/logger.hpp"
 #include "tools/math_tools.hpp"
-#include "tools/tomlpp.hpp"
 #include "tools/trajectory.hpp"
 
 static constexpr const char* MODULE = "AUTO_AIM";
 
 namespace app::auto_aim {
 
-Aimer::Aimer(const std::string& config_path) {
-    auto config = toml::parse_file(config_path);
-    yaw_offset_ = config["aimer"]["yaw_offset"].value_or(0.0) / 57.3;
-    pitch_offset_ = config["aimer"]["pitch_offset"].value_or(0.0) / 57.3;
-    coming_angle_ = config["aimer"]["coming_angle"].value_or(60.0) / 57.3;
-    leaving_angle_ = config["aimer"]["leaving_angle"].value_or(20.0) / 57.3;
-    decision_speed_ = config["aimer"]["decision_speed"].value_or(10.0);
-    high_speed_delay_time_ =
-        config["aimer"]["high_speed_delay_time"].value_or(0.026);
-    low_speed_delay_time_ =
-        config["aimer"]["low_speed_delay_time"].value_or(0.010);
+Aimer::Aimer(const std::string& config_path) : Aimer(load_aimer_config(config_path)) {}
+
+Aimer::Aimer(const AimerConfig& config)
+    : yaw_offset_(config.yaw_offset), pitch_offset_(config.pitch_offset),
+      coming_angle_(config.coming_angle), leaving_angle_(config.leaving_angle),
+      high_speed_delay_time_(config.high_speed_delay_time),
+      low_speed_delay_time_(config.low_speed_delay_time), decision_speed_(config.decision_speed) {
+    validate(config);
 }
 
-io::Command Aimer::aim(
-    std::list<Target> targets, std::chrono::steady_clock::time_point timestamp,
-    double bullet_speed, bool to_now) {
+io::Command Aimer::aim(const std::list<Target>& targets,
+                       std::chrono::steady_clock::time_point timestamp, double bullet_speed,
+                       bool to_now) {
     debug_aim_point = {};
-    if (targets.empty()) return {};
+    if (targets.empty())
+        return {};
 
-    auto target = targets.front();
-    const double delay_time = std::abs(target.ekf_x()[7]) > decision_speed_
+    auto target = targets.front().snapshot();
+    if (!target.valid() || !std::isfinite(bullet_speed))
+        return {};
+    const double delay_time = std::abs(target.state[target_state::YawRate]) > decision_speed_
                                   ? high_speed_delay_time_
                                   : low_speed_delay_time_;
 
-    if (bullet_speed < 14.0) bullet_speed = 23.0;
+    if (bullet_speed < 14.0)
+        bullet_speed = 23.0;
 
     auto future = timestamp;
     if (to_now) {
         const double dt =
             tools::delta_time(std::chrono::steady_clock::now(), timestamp) + delay_time;
         future += std::chrono::microseconds(static_cast<int64_t>(dt * 1e6));
-        target.predict(future);
+        target = target.predicted(future);
     } else {
         constexpr double pipeline_delay = 0.005;
         const double dt = pipeline_delay + delay_time;
         future += std::chrono::microseconds(static_cast<int64_t>(dt * 1e6));
-        target.predict(future);
+        target = target.predicted(future);
     }
 
     auto aim_point = choose_aim_point(target);
     debug_aim_point = aim_point;
-    if (!aim_point.valid) return {};
+    if (!aim_point.valid)
+        return {};
 
     const Eigen::Vector3d xyz0 = aim_point.xyza.head<3>();
     const double d0 = std::hypot(xyz0.x(), xyz0.y());
     tools::Trajectory trajectory0(bullet_speed, d0, xyz0.z());
     if (trajectory0.unsolvable) {
-        LOG_DEBUG(
-            MODULE, "[Aimer] Unsolvable trajectory: speed={:.2f}, d={:.2f}, z={:.2f}",
-            bullet_speed, d0, xyz0.z());
+        LOG_DEBUG(MODULE, "[Aimer] Unsolvable trajectory: speed={:.2f}, d={:.2f}, z={:.2f}",
+                  bullet_speed, d0, xyz0.z());
         debug_aim_point.valid = false;
         return {};
     }
@@ -71,30 +72,29 @@ io::Command Aimer::aim(
     tools::Trajectory current_trajectory = trajectory0;
 
     for (int iteration = 0; iteration < 10; ++iteration) {
-        auto predicted_target = target;
         const auto predict_time =
-            future + std::chrono::microseconds(
-                         static_cast<int64_t>(previous_fly_time * 1e6));
-        predicted_target.predict(predict_time);
+            future + std::chrono::microseconds(static_cast<int64_t>(previous_fly_time * 1e6));
+        const auto predicted_target = target.predicted(predict_time);
 
         aim_point = choose_aim_point(predicted_target);
         debug_aim_point = aim_point;
-        if (!aim_point.valid) return {};
+        if (!aim_point.valid)
+            return {};
 
         const Eigen::Vector3d xyz = aim_point.xyza.head<3>();
         const double distance = std::hypot(xyz.x(), xyz.y());
         current_trajectory = tools::Trajectory(bullet_speed, distance, xyz.z());
         if (current_trajectory.unsolvable) {
-            LOG_DEBUG(
-                MODULE,
-                "[Aimer] Unsolvable trajectory in iteration {}: speed={:.2f}, "
-                "d={:.2f}, z={:.2f}",
-                iteration + 1, bullet_speed, distance, xyz.z());
+            LOG_DEBUG(MODULE,
+                      "[Aimer] Unsolvable trajectory in iteration {}: speed={:.2f}, "
+                      "d={:.2f}, z={:.2f}",
+                      iteration + 1, bullet_speed, distance, xyz.z());
             debug_aim_point.valid = false;
             return {};
         }
 
-        if (std::abs(current_trajectory.fly_time - previous_fly_time) < 0.001) break;
+        if (std::abs(current_trajectory.fly_time - previous_fly_time) < 0.001)
+            break;
         previous_fly_time = current_trajectory.fly_time;
     }
 
@@ -106,26 +106,29 @@ io::Command Aimer::aim(
     return command;
 }
 
-AimPoint Aimer::choose_aim_point(const Target& target) {
-    const Eigen::VectorXd ekf_x = target.ekf_x();
+AimPoint Aimer::choose_aim_point(const TargetSnapshot& target) {
+    const auto& state = target.state;
     const std::vector<Eigen::Vector4d> armor_xyza_list = target.armor_xyza_list();
     const int armor_count = static_cast<int>(armor_xyza_list.size());
-    if (armor_count == 0) return {};
+    if (armor_count == 0)
+        return {};
 
-    if (!target.jumped) return {true, armor_xyza_list.front()};
+    if (!target.jumped)
+        return {true, armor_xyza_list.front()};
 
-    const double center_yaw = std::atan2(ekf_x[2], ekf_x[0]);
+    const double center_yaw = std::atan2(state[target_state::Y], state[target_state::X]);
     std::vector<double> delta_angles;
     delta_angles.reserve(armor_xyza_list.size());
     for (const auto& armor_xyza : armor_xyza_list) {
         delta_angles.emplace_back(tools::limit_rad(armor_xyza[3] - center_yaw));
     }
 
-    const double angular_speed = ekf_x[7];
+    const double angular_speed = state[target_state::YawRate];
     if (std::abs(angular_speed) <= 2.0 && target.name != ArmorName::outpost) {
         std::vector<int> candidates;
         for (int i = 0; i < armor_count; ++i) {
-            if (std::abs(delta_angles[i]) <= 60.0 / 57.3) candidates.emplace_back(i);
+            if (std::abs(delta_angles[i]) <= 60.0 * CV_PI / 180.0)
+                candidates.emplace_back(i);
         }
         if (candidates.empty()) {
             LOG_WARN(MODULE, "[Aimer] No armor is inside the shootable angle");
@@ -150,12 +153,13 @@ AimPoint Aimer::choose_aim_point(const Target& target) {
     double coming_angle = coming_angle_;
     double leaving_angle = leaving_angle_;
     if (target.name == ArmorName::outpost) {
-        coming_angle = 70.0 / 57.3;
-        leaving_angle = 30.0 / 57.3;
+        coming_angle = 70.0 * CV_PI / 180.0;
+        leaving_angle = 30.0 * CV_PI / 180.0;
     }
 
     for (int i = 0; i < armor_count; ++i) {
-        if (std::abs(delta_angles[i]) > coming_angle) continue;
+        if (std::abs(delta_angles[i]) > coming_angle)
+            continue;
         if (angular_speed > 0.0 && delta_angles[i] < leaving_angle) {
             return {true, armor_xyza_list[i]};
         }
@@ -167,4 +171,4 @@ AimPoint Aimer::choose_aim_point(const Target& target) {
     return {};
 }
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim

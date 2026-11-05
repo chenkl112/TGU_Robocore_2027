@@ -2,49 +2,44 @@
 #include "keypoints.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
-#include <filesystem>
 #include <format>
-#include <random>
+#include <limits>
 #include <stdexcept>
 
+#include "armor_image.hpp"
+#include "roi.hpp"
 #include "tools/img_tools.hpp"
 #include "tools/logger.hpp"
-#include "tools/tomlpp.hpp"
 
 static constexpr const char* MODULE = "AUTO_AIM";
 
 namespace app::auto_aim {
 
 YOLOV8::YOLOV8(const std::string& config_path, bool debug)
-    : classifier_(config_path), debug_(debug) {
-    auto config = toml::parse_file(config_path);
+    : YOLOV8(load_vision_config(config_path), debug) {}
 
-    model_path_ = config["yolo"]["yolo_model"].value_or("config/yolov8_armor.onnx");
-    device_ = config["yolo"]["device"].value_or("AUTO");
-    min_confidence_ = config["detector"]["min_confidence"].value_or(0.6);
+YOLOV8::YOLOV8(const VisionConfig& config, bool debug)
+    : YOLOV8(config.yolo, config.classifier, debug) {}
 
-    use_roi_ = config["yolo"]["use_roi"].value_or(false);
-    int x = config["yolo"]["roi_x"].value_or(0);
-    int y = config["yolo"]["roi_y"].value_or(0);
-    int width = config["yolo"]["roi_width"].value_or(-1);
-    int height = config["yolo"]["roi_height"].value_or(-1);
-    roi_ = cv::Rect(x, y, width, height);
-    offset_ = cv::Point2f(x, y);
-
+YOLOV8::YOLOV8(const YoloConfig& config, const ClassifierConfig& classifier, bool debug)
+    : classifier_(classifier), device_(config.device), model_path_(config.model_path),
+      debug_(debug), use_roi_(config.use_roi), min_confidence_(config.min_confidence),
+      configured_roi_(config.roi_x, config.roi_y, config.roi_width, config.roi_height) {
+    validate(config);
     auto model = core_.read_model(model_path_);
     const auto model_shape = model->input().get_shape();
     const ov::Shape expected_shape = {1, 3, network_height_, network_width_};
     if (model_shape != expected_shape) {
-        throw std::runtime_error(std::format(
-            "YOLO model input must be NCHW 1x3x{}x{}, got {}", network_height_,
-            network_width_, model->input().get_partial_shape().to_string()));
+        throw std::runtime_error(std::format("YOLO model input must be NCHW 1x3x{}x{}, got {}",
+                                             network_height_, network_width_,
+                                             model->input().get_partial_shape().to_string()));
     }
     const ov::Shape expected_output_shape = {1, 14, 6300};
     if (model->output().get_shape() != expected_output_shape) {
-        throw std::runtime_error(std::format(
-            "YOLO model output must be 1x14x6300, got {}",
-            model->output().get_partial_shape().to_string()));
+        throw std::runtime_error(std::format("YOLO model output must be 1x14x6300, got {}",
+                                             model->output().get_partial_shape().to_string()));
     }
 
     ov::preprocess::PrePostProcessor ppp(model);
@@ -66,8 +61,13 @@ YOLOV8::YOLOV8(const std::string& config_path, bool debug)
     model = ppp.build();
     compiled_model_ = core_.compile_model(
         model, device_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
-    LOG_INFO(
-        MODULE, "Loaded YOLO model {} with 640x480 network input", model_path_);
+    input_image_.create(static_cast<int>(network_height_), static_cast<int>(network_width_),
+                        CV_8UC3);
+    input_tensor_ =
+        ov::Tensor(ov::element::u8, {1, network_height_, network_width_, 3}, input_image_.data);
+    infer_request_ = compiled_model_.create_infer_request();
+    infer_request_.set_input_tensor(input_tensor_);
+    LOG_INFO(MODULE, "Loaded YOLO model {} with 640x480 network input", model_path_);
 }
 
 std::list<Armor> YOLOV8::detect(const cv::Mat& raw_img, int frame_count) {
@@ -79,20 +79,13 @@ std::list<Armor> YOLOV8::detect(const cv::Mat& raw_img, int frame_count) {
     if (raw_img.type() != CV_8UC3) {
         throw std::invalid_argument("YOLO expects an 8-bit BGR image");
     }
-    cv::Mat bgr_img;
-    if (use_roi_) {
-        if (roi_.width < 0) roi_.width = raw_img.cols - roi_.x;
-        if (roi_.height < 0) roi_.height = raw_img.rows - roi_.y;
-        roi_ &= cv::Rect(0, 0, raw_img.cols, raw_img.rows);
-        if (roi_.empty()) {
-            LOG_ERROR(MODULE, "Configured YOLO ROI is outside the image");
-            return {};
-        }
-        offset_ = cv::Point2f(static_cast<float>(roi_.x), static_cast<float>(roi_.y));
-        bgr_img = raw_img(roi_);
-    } else {
-        bgr_img = raw_img;
+    const auto roi = effective_yolo_roi(configured_roi_, use_roi_, raw_img.size());
+    if (roi.empty()) {
+        LOG_ERROR(MODULE, "Configured YOLO ROI is outside the image");
+        return {};
     }
+    const cv::Mat bgr_img = raw_img(roi);
+    const cv::Point2f offset(static_cast<float>(roi.x), static_cast<float>(roi.y));
 
     const auto height_scale = static_cast<double>(network_height_) / bgr_img.rows;
     const auto width_scale = static_cast<double>(network_width_) / bgr_img.cols;
@@ -100,45 +93,47 @@ std::list<Armor> YOLOV8::detect(const cv::Mat& raw_img, int frame_count) {
     auto h = static_cast<int>(bgr_img.rows * scale);
     auto w = static_cast<int>(bgr_img.cols * scale);
 
-    auto input = cv::Mat(
-        static_cast<int>(network_height_), static_cast<int>(network_width_), CV_8UC3,
-        cv::Scalar(0, 0, 0));
-    auto roi = cv::Rect(0, 0, w, h);
-    cv::resize(bgr_img, input(roi), {w, h});
-    ov::Tensor input_tensor(
-        ov::element::u8, {1, network_height_, network_width_, 3}, input.data);
-
-    auto infer_request = compiled_model_.create_infer_request();
-    infer_request.set_input_tensor(input_tensor);
-    infer_request.infer();
-
-    auto output_tensor = infer_request.get_output_tensor();
-    auto output_shape = output_tensor.get_shape();
-    constexpr std::size_t expected_output_channels = 14;
-    if (output_shape.size() != 3 || output_shape[1] != expected_output_channels) {
-        LOG_ERROR(MODULE, "Unexpected YOLO output shape");
+    if (w <= 0 || h <= 0)
         return {};
-    }
-    cv::Mat output(
-        static_cast<int>(output_shape[1]), static_cast<int>(output_shape[2]), CV_32F,
-        output_tensor.data<float>());
+    // 清空上一帧的补边，复用固定内存；宽高比变化时也不会遗留旧图像。
+    input_image_.setTo(cv::Scalar::all(0));
+    cv::resize(bgr_img, input_image_(cv::Rect(0, 0, w, h)), {w, h});
+    infer_request_.infer();
 
-    return parse(scale, output, raw_img, frame_count);
+    auto output_tensor = infer_request_.get_output_tensor();
+    const auto output_shape = output_tensor.get_shape();
+    if (output_shape != ov::Shape({1, 14, 6300}) ||
+        output_tensor.get_element_type() != ov::element::f32) {
+        throw std::runtime_error("YOLO output must be float32 1x14x6300");
+    }
+    cv::Mat output(static_cast<int>(output_shape[1]), static_cast<int>(output_shape[2]), CV_32F,
+                   output_tensor.data<float>());
+
+    return parse(scale, output, raw_img, frame_count, offset);
 }
 
-std::list<Armor> YOLOV8::parse(
-    double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count) {
-    cv::transpose(output, output);
+std::list<Armor> YOLOV8::parse(double scale, const cv::Mat& output, const cv::Mat& bgr_img,
+                               int frame_count, cv::Point2f offset) {
+    if (!std::isfinite(scale) || scale <= 0 || output.dims != 2 || output.type() != CV_32F ||
+        output.rows != 14 || output.cols != 6300 || bgr_img.empty() || bgr_img.type() != CV_8UC3) {
+        throw std::invalid_argument(
+            "YOLO postprocess expects positive scale, float32 14x6300 output and BGR image");
+    }
+    cv::Mat rows;
+    cv::transpose(output, rows);
 
     std::vector<int> ids;
     std::vector<float> confidences;
     std::vector<cv::Rect> boxes;
     std::vector<std::vector<cv::Point2f>> armors_key_points;
 
-    for (int r = 0; r < output.rows; r++) {
-        auto xywh = output.row(r).colRange(0, 4);
-        auto scores = output.row(r).colRange(4, 4 + class_num_);
-        auto one_key_points = output.row(r).colRange(4 + class_num_, 14);
+    for (int r = 0; r < rows.rows; r++) {
+        const auto row = rows.row(r);
+        if (!cv::checkRange(row))
+            continue;
+        auto xywh = row.colRange(0, 4);
+        auto scores = row.colRange(4, 4 + class_num_);
+        auto one_key_points = row.colRange(4 + class_num_, 14);
 
         std::vector<cv::Point2f> armor_key_points;
 
@@ -146,16 +141,25 @@ std::list<Armor> YOLOV8::parse(
         cv::Point max_point;
         cv::minMaxLoc(scores, nullptr, &score, nullptr, &max_point);
 
-        if (score < score_threshold_) continue;
+        if (score < score_threshold_)
+            continue;
 
         auto x = xywh.at<float>(0);
         auto y = xywh.at<float>(1);
         auto w = xywh.at<float>(2);
         auto h = xywh.at<float>(3);
+        // 网络异常输出不能进入浮点转整数和 NMS 的边界运算。
+        constexpr double coordinate_limit = std::numeric_limits<int>::max() / 8.0;
+        if (w <= 0 || h <= 0 || std::abs(x / scale) > coordinate_limit ||
+            std::abs(y / scale) > coordinate_limit || w / scale > coordinate_limit ||
+            h / scale > coordinate_limit)
+            continue;
         auto left = static_cast<int>((x - 0.5 * w) / scale);
         auto top = static_cast<int>((y - 0.5 * h) / scale);
         auto width = static_cast<int>(w / scale);
         auto height = static_cast<int>(h / scale);
+        if (width <= 0 || height <= 0)
+            continue;
 
         for (int i = 0; i < 4; i++) {
             float x = one_key_points.at<float>(0, i * 2 + 0) / scale;
@@ -174,13 +178,9 @@ std::list<Armor> YOLOV8::parse(
 
     std::list<Armor> armors;
     for (const auto& i : indices) {
-        if (!decode_yolov8_keypoints(armors_key_points[i])) continue;
-        if (use_roi_) {
-            armors.emplace_back(
-                ids[i], confidences[i], boxes[i], armors_key_points[i], offset_);
-        } else {
-            armors.emplace_back(ids[i], confidences[i], boxes[i], armors_key_points[i]);
-        }
+        if (!decode_yolov8_keypoints(armors_key_points[i]))
+            continue;
+        armors.emplace_back(ids[i], confidences[i], boxes[i], armors_key_points[i], offset);
     }
 
     for (auto it = armors.begin(); it != armors.end();) {
@@ -192,17 +192,14 @@ std::list<Armor> YOLOV8::parse(
             continue;
         }
 
-        it->type = get_type(*it);
-        if (!check_type(*it)) {
-            it = armors.erase(it);
-            continue;
-        }
+        it->type = armor_type_from_name(it->name);
 
         it->center_norm = get_center_norm(bgr_img, it->center);
         ++it;
     }
 
-    if (debug_) draw_detections(bgr_img, armors, frame_count);
+    if (debug_)
+        draw_detections(bgr_img, armors, frame_count);
 
     return armors;
 }
@@ -213,75 +210,43 @@ bool YOLOV8::check_name(const Armor& armor) const {
     return name_ok && confidence_ok;
 }
 
-bool YOLOV8::check_type(const Armor& armor) const {
-    const bool name_ok = (armor.type == ArmorType::small)
-                             ? armor.name != ArmorName::one
-                             : armor.name != ArmorName::two && armor.name != ArmorName::sentry;
-    return name_ok;
-}
-
-ArmorType YOLOV8::get_type(const Armor& armor) {
-    return armor_type_from_name(armor.name);
-}
-
-cv::Point2f YOLOV8::get_center_norm(
-    const cv::Mat& bgr_img, const cv::Point2f& center) const {
+cv::Point2f YOLOV8::get_center_norm(const cv::Mat& bgr_img, const cv::Point2f& center) const {
     auto h = bgr_img.rows;
     auto w = bgr_img.cols;
     return {center.x / w, center.y / h};
 }
 
 cv::Mat YOLOV8::get_pattern(const cv::Mat& bgr_img, const Armor& armor) const {
-    auto tl =
-        (armor.points[0] + armor.points[3]) / 2 -
-        (armor.points[3] - armor.points[0]) * 1.125;
-    auto bl =
-        (armor.points[0] + armor.points[3]) / 2 +
-        (armor.points[3] - armor.points[0]) * 1.125;
-    auto tr =
-        (armor.points[2] + armor.points[1]) / 2 -
-        (armor.points[2] - armor.points[1]) * 1.125;
-    auto br =
-        (armor.points[2] + armor.points[1]) / 2 +
-        (armor.points[2] - armor.points[1]) * 1.125;
-
-    auto roi_left = std::max<int>(std::min(tl.x, bl.x), 0);
-    auto roi_top = std::max<int>(std::min(tl.y, tr.y), 0);
-    auto roi_right = std::min<int>(std::max(tr.x, br.x), bgr_img.cols);
-    auto roi_bottom = std::min<int>(std::max(bl.y, br.y), bgr_img.rows);
-
-    if (roi_left < 0 || roi_top < 0 || roi_right <= roi_left || roi_bottom <= roi_top) {
-        return cv::Mat();
-    }
-    if (roi_right > bgr_img.cols || roi_bottom > bgr_img.rows) {
-        return cv::Mat();
-    }
-
-    return bgr_img(cv::Rect(cv::Point(roi_left, roi_top), cv::Point(roi_right, roi_bottom)));
+    return extract_armor_pattern(bgr_img, armor.points);
 }
 
-void YOLOV8::draw_detections(
-    const cv::Mat& img, const std::list<Armor>& armors, int frame_count) const {
+void YOLOV8::draw_detections(const cv::Mat& img, const std::list<Armor>& armors,
+                             int frame_count) const {
     auto detection = img.clone();
-    tools::draw_text(
-        detection, std::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
+    tools::draw_text(detection, std::format("[{}]", frame_count), {10, 30}, {255, 255, 255});
     for (const auto& armor : armors) {
-        auto info = std::format(
-            "{:.2f} {} {}", armor.confidence, ARMOR_NAMES[armor.name],
-            ARMOR_TYPES[armor.type]);
-        tools::draw_points(detection, armor.points, {0, 255, 0});
+        auto info = std::format("{:.2f} {} {}", armor.confidence, ARMOR_NAMES[armor.name],
+                                ARMOR_TYPES[armor.type]);
+        tools::draw_points(detection,
+                           std::vector<cv::Point2f>(armor.points.begin(), armor.points.end()),
+                           {0, 255, 0});
         tools::draw_text(detection, info, armor.center, {0, 255, 0});
     }
     if (use_roi_) {
-        cv::rectangle(detection, roi_, cv::Scalar(0, 255, 0), 2);
+        cv::rectangle(detection, effective_yolo_roi(configured_roi_, use_roi_, img.size()),
+                      cv::Scalar(0, 255, 0), 2);
     }
     cv::resize(detection, detection, {}, 0.5, 0.5);
     cv::imshow("detection", detection);
 }
 
-std::list<Armor> YOLOV8::postprocess(
-    double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count) {
-    return parse(scale, output, bgr_img, frame_count);
+std::list<Armor> YOLOV8::postprocess(double scale, const cv::Mat& output, const cv::Mat& bgr_img,
+                                     int frame_count) {
+    const auto roi = effective_yolo_roi(configured_roi_, use_roi_, bgr_img.size());
+    if (roi.empty())
+        return {};
+    return parse(scale, output, bgr_img, frame_count,
+                 {static_cast<float>(roi.x), static_cast<float>(roi.y)});
 }
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim

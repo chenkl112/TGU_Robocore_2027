@@ -15,7 +15,8 @@ namespace {
 using namespace app::auto_aim;
 
 void require(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition)
+        throw std::runtime_error(message);
 }
 
 struct FireConfig {
@@ -27,9 +28,10 @@ struct FireConfig {
         shooter.insert_or_assign("auto_fire", true);
         shooter.insert_or_assign("first_tolerance", 5.0);
         shooter.insert_or_assign("judge_distance", 3.0);
-        path = std::filesystem::temp_directory_path() /
-            ("robocore-shooter-current-" + std::to_string(
-                std::chrono::steady_clock::now().time_since_epoch().count()) + ".toml");
+        path =
+            std::filesystem::temp_directory_path() /
+            ("robocore-shooter-current-" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".toml");
         std::ofstream output(path);
         output << config;
         require(static_cast<bool>(output), "Cannot write shooter test config");
@@ -48,12 +50,11 @@ Target near_target() {
     armor.xyz_in_world = {1.0, 0, 0};
     armor.ypr_in_world = {0, 0, 0};
     armor.ypd_in_world = tools::xyz2ypd(armor.xyz_in_world);
-    Target target(armor, std::chrono::steady_clock::now(), 0.2, 4,
-                  Eigen::VectorXd::Ones(11));
+    Target target(armor, std::chrono::steady_clock::now(), 0.2, 4, Eigen::VectorXd::Ones(11));
     target.observed = true;
     return target;
 }
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     tools::Logger::instance().init({.level = tools::LogLevel::Off, .enable_console = false});
@@ -70,10 +71,11 @@ int main(int argc, char** argv) {
             command.control = true;
             require(shooter.shoot(command, aimer, targets, {0, 0, 0}),
                     "Initially aligned command cannot fire");
-            if (axis == 0) command.yaw = 0.15;
-            else command.pitch = 0.15;
-            // 8.59 degrees is below the stability threshold (10 degrees),
-            // but above the actual alignment tolerance (5 degrees).
+            if (axis == 0)
+                command.yaw = 0.15;
+            else
+                command.pitch = 0.15;
+            // 8.59° 小于稳定性门限 10°，但已经超过实际对齐容差 5°。
             require(!shooter.shoot(command, aimer, targets, {0, 0, 0}),
                     "Feedback aligned only to the previous command allowed fire");
             require(shooter.shoot(command, aimer, targets, {command.yaw, command.pitch, 0}),
@@ -100,8 +102,10 @@ int main(int argc, char** argv) {
             Shooter shooter(config.path.string());
             io::Command command;
             command.control = true;
-            if (axis == 0) command.yaw = 0.3;
-            else command.pitch = 0.3;
+            if (axis == 0)
+                command.yaw = 0.3;
+            else
+                command.pitch = 0.3;
             require(!shooter.shoot(command, aimer, targets, {command.yaw, command.pitch, 0}),
                     "Current alignment bypassed the command stability check");
             require(shooter.shoot(command, aimer, targets, {command.yaw, command.pitch, 0}),
@@ -112,9 +116,9 @@ int main(int argc, char** argv) {
             Shooter shooter(config.path.string());
             io::Command command;
             command.control = true;
-            for (double invalid : {std::numeric_limits<double>::quiet_NaN(),
-                                   std::numeric_limits<double>::infinity(),
-                                   -std::numeric_limits<double>::infinity()}) {
+            for (double invalid :
+                 {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+                  -std::numeric_limits<double>::infinity()}) {
                 require(!shooter.shoot(command, aimer, targets, {invalid, 0, 0}),
                         "Nonfinite yaw feedback allowed fire");
                 require(!shooter.shoot(command, aimer, targets, {0, invalid, 0}),
@@ -124,7 +128,8 @@ int main(int argc, char** argv) {
                     "Valid aligned feedback did not recover after invalid feedback");
         }
 
-        std::cout << "PASS current-command yaw/pitch alignment, wrap, stability and invalid feedback\n";
+        std::cout
+            << "PASS current-command yaw/pitch alignment, wrap, stability and invalid feedback\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

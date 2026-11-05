@@ -1,5 +1,5 @@
-#include "test_support.hpp"
 #include "io/serial/serial.hpp"
+#include "test_support.hpp"
 #include "tools/crc.hpp"
 #include "tools/logger.hpp"
 
@@ -23,11 +23,13 @@ Packet packet(uint32_t value = 42) {
     result.crc = tools::get_crc16(reinterpret_cast<const uint8_t*>(&result), sizeof(result) - 2);
     return result;
 }
-const uint8_t* bytes(const Packet& value) { return reinterpret_cast<const uint8_t*>(&value); }
+const uint8_t* bytes(const Packet& value) {
+    return reinterpret_cast<const uint8_t*>(&value);
+}
 void subscribe(io::Serial& serial, std::vector<uint32_t>& received) {
-    serial.recv<Packet>([&received](const Packet& value) {
-        received.push_back(value.value);
-    }, [](const Packet& value) { return tools::check_crc16(bytes(value), sizeof(value)); });
+    serial.recv<Packet>(
+        [&received](const Packet& value) { received.push_back(value.value); },
+        [](const Packet& value) { return tools::check_crc16(bytes(value), sizeof(value)); });
 }
 void open(io::Serial& serial, const Pty& pty) {
     require(serial.open(pty.name(), 115200), "Cannot open test serial port");
@@ -47,7 +49,10 @@ void close_read() {
     io::Serial serial;
     open(serial, pty);
     std::latch started(1);
-    std::jthread reader([&] { started.count_down(); serial.spin_once(); });
+    std::jthread reader([&] {
+        started.count_down();
+        serial.spin_once();
+    });
     started.wait();
     std::this_thread::sleep_for(20ms);
     const auto start = Clock::now();
@@ -101,7 +106,8 @@ void false_header() {
     stream.insert(stream.end(), bytes(valid), bytes(valid) + sizeof(valid));
     pty.send(stream.data(), stream.size());
     serial.spin_once();
-    require(received == std::vector<uint32_t>{123}, "False header swallowed the following valid CRC packet");
+    require(received == std::vector<uint32_t>{123},
+            "False header swallowed the following valid CRC packet");
     auto corrupt = packet(456);
     corrupt.crc ^= 1;
     const auto second = packet(789);
@@ -112,8 +118,8 @@ void false_header() {
         pty.send(&byte, 1);
         serial.spin_once();
     }
-    require(received == std::vector<uint32_t>({123,789}), "Fragmented corrupt/false headers lost or duplicated a frame");
-
+    require(received == std::vector<uint32_t>({123, 789}),
+            "Fragmented corrupt/false headers lost or duplicated a frame");
 }
 void isolated_ports() {
     Pty pty_a, pty_b;
@@ -139,7 +145,7 @@ void reopen() {
     open(serial, old_port);
     old_port.send(bytes(value), 4);
     serial.spin_once();
-    // open() also replaces an existing port without requiring explicit close().
+    // open() 可直接替换现有端口，无需先显式 close()。
     open(serial, new_port);
     new_port.send(bytes(value) + 4, sizeof(value) - 4);
     serial.spin_once();
@@ -155,13 +161,13 @@ void reopen() {
 }
 size_t fd_count() {
     return static_cast<size_t>(std::distance(std::filesystem::directory_iterator("/proc/self/fd"),
-                                            std::filesystem::directory_iterator{}));
+                                             std::filesystem::directory_iterator{}));
 }
 void failed_open() {
     Pty pty;
     io::Serial serial;
     const auto before = fd_count();
-    // Boost creates its reactor descriptors on first open; warm it up first.
+    // Boost 首次 open 时创建事件循环描述符；先预热再统计端口泄漏。
     open(serial, pty);
     serial.close();
     const auto warmed = fd_count();
@@ -175,7 +181,8 @@ void failed_open() {
     open(serial, pty);
     const auto value = packet();
     require(serial.send(value) == sizeof(value), "Write after failed-open recovery failed");
-    require(pty.receive(sizeof(value)) == std::vector<uint8_t>(bytes(value), bytes(value) + sizeof(value)),
+    require(pty.receive(sizeof(value)) ==
+                std::vector<uint8_t>(bytes(value), bytes(value) + sizeof(value)),
             "Unexpected bytes after recovery");
 }
 void disconnect() {
@@ -211,7 +218,8 @@ void write_timeout(bool close_pending) {
     writer.join();
     const auto elapsed = Clock::now() - start;
     require(elapsed < 1s, "Backpressured write failed to return in bounded time");
-    if (!close_pending) require(elapsed >= 200ms, "Write timed out too early");
+    if (!close_pending)
+        require(elapsed >= 200ms, "Write timed out too early");
     require(sent > 0 && sent < large.size(), "Expected an accurate partial write count");
     require(!serial.is_open(), "Incomplete write left a partial stream active");
 }
@@ -230,8 +238,33 @@ void callback_close() {
     pty.send(bytes(value), sizeof(value));
     serial.spin_once();
     require(first && !second && !serial.is_open(), "Callback send/close semantics failed");
-    require(pty.receive(sizeof(response)) == std::vector<uint8_t>(bytes(response), bytes(response) + sizeof(response)),
+    require(pty.receive(sizeof(response)) ==
+                std::vector<uint8_t>(bytes(response), bytes(response) + sizeof(response)),
             "Callback response was corrupted");
+}
+void guarded_cancel() {
+    Pty pty;
+    io::Serial serial;
+    open(serial, pty);
+    const std::vector<uint8_t> large(4 * 1024 * 1024, 0x5a);
+    size_t guard_calls = 0;
+    // 守卫在首段写出后撤销；返回值必须只包含已写字节，残帧连接必须失效。
+    const size_t sent = serial.write(large.data(), large.size(),
+                                     [&](size_t written, const io::Serial::WriteAttempt& attempt) {
+                                         ++guard_calls;
+                                         if (written > 0)
+                                             return false;
+                                         attempt();
+                                         return true;
+                                     });
+    require(guard_calls >= 2 && sent > 0 && sent < large.size(),
+            "Guard cancellation did not preserve the partial byte count");
+    require(!serial.is_open(), "Canceled partial frame left its connection active");
+    open(serial, pty);
+    const auto canceled = serial.write(
+        large.data(), large.size(), [](size_t, const io::Serial::WriteAttempt&) { return false; });
+    require(canceled == 0 && serial.is_open(),
+            "Canceling before the first byte closed a healthy port");
 }
 void queued_write() {
     Pty old_port, new_port;
@@ -244,7 +277,7 @@ void queued_write() {
         serial.write(large.data(), large.size());
     });
     started.wait();
-    // Receiving a byte proves the first sender has started and owns the stream.
+    // 收到一个字节即可证明第一个发送者已经开始写入并持有发送权。
     old_port.receive(1);
     std::latch queued(1);
     std::atomic<bool> finished{false};
@@ -287,7 +320,8 @@ void concurrent() {
     std::atomic<bool> stop{false};
     std::atomic<bool> peer_failed{false};
     serial.recv<Packet>([&](const Packet& value) {
-        if (tools::check_crc16(bytes(value), sizeof(value))) ++received;
+        if (tools::check_crc16(bytes(value), sizeof(value)))
+            ++received;
     });
     const auto value = packet();
     auto peer = [&](const Pty& pty) {
@@ -307,7 +341,10 @@ void concurrent() {
         }
     };
     std::jthread peer_a([&] { peer(a); }), peer_b([&] { peer(b); });
-    std::jthread reader([&] { while (!stop.load()) serial.spin_once(); });
+    std::jthread reader([&] {
+        while (!stop.load())
+            serial.spin_once();
+    });
     std::jthread writer([&] {
         while (!stop.load()) {
             serial.send(value);
@@ -319,8 +356,9 @@ void concurrent() {
         serial.close();
         opened = serial.open((repeat % 2 ? a : b).name(), 115200) && opened;
         std::this_thread::sleep_for(2ms);
-        // Registration must not invalidate the callback list being dispatched.
-        if (repeat == 50) serial.recv<Packet>([](const Packet&) {});
+        // 注册新订阅不能使正在分派的回调列表失效。
+        if (repeat == 50)
+            serial.recv<Packet>([](const Packet&) {});
     }
     stop = true;
     writer.join();
@@ -332,29 +370,47 @@ void concurrent() {
     require(received > 0, "Concurrent reader never received a valid packet");
     serial.close();
 }
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     tools::Logger::instance().init({.level = tools::LogLevel::Off, .enable_console = false});
     try {
         require(argc == 2, "Expected a test scenario");
         const std::string scenario(argv[1]);
-        if (scenario == "read_timeout") read_timeout();
-        else if (scenario == "close_read") close_read();
-        else if (scenario == "fragmented") fragmented(false);
-        else if (scenario == "subscriptions") fragmented(true);
-        else if (scenario == "false_header") false_header();
-        else if (scenario == "isolated_ports") isolated_ports();
-        else if (scenario == "reopen") reopen();
-        else if (scenario == "failed_open") failed_open();
-        else if (scenario == "disconnect") disconnect();
-        else if (scenario == "write_timeout") write_timeout(false);
-        else if (scenario == "close_write") write_timeout(true);
-        else if (scenario == "queued_write") queued_write();
-        else if (scenario == "callback_close") callback_close();
-        else if (scenario == "callback_throw") callback_throw();
-        else if (scenario == "concurrent") concurrent();
-        else throw std::runtime_error("Unknown scenario: " + scenario);
+        if (scenario == "read_timeout")
+            read_timeout();
+        else if (scenario == "close_read")
+            close_read();
+        else if (scenario == "fragmented")
+            fragmented(false);
+        else if (scenario == "subscriptions")
+            fragmented(true);
+        else if (scenario == "false_header")
+            false_header();
+        else if (scenario == "isolated_ports")
+            isolated_ports();
+        else if (scenario == "reopen")
+            reopen();
+        else if (scenario == "failed_open")
+            failed_open();
+        else if (scenario == "disconnect")
+            disconnect();
+        else if (scenario == "write_timeout")
+            write_timeout(false);
+        else if (scenario == "close_write")
+            write_timeout(true);
+        else if (scenario == "queued_write")
+            queued_write();
+        else if (scenario == "callback_close")
+            callback_close();
+        else if (scenario == "callback_throw")
+            callback_throw();
+        else if (scenario == "concurrent")
+            concurrent();
+        else if (scenario == "guarded_cancel")
+            guarded_cancel();
+        else
+            throw std::runtime_error("Unknown scenario: " + scenario);
         std::cout << "PASS " << scenario << '\n';
         return 0;
     } catch (const std::exception& error) {

@@ -11,7 +11,8 @@ namespace {
 using namespace app::auto_aim;
 
 void require(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition)
+        throw std::runtime_error(message);
 }
 
 double error(const Solver& solver, const Armor& armor, double yaw) {
@@ -22,7 +23,7 @@ double error(const Solver& solver, const Armor& armor, double yaw) {
     }
     return result;
 }
-}
+} // namespace
 
 int main(int argc, char** argv) {
     tools::Logger::instance().init({.level = tools::LogLevel::Off, .enable_console = false});
@@ -39,14 +40,15 @@ int main(int argc, char** argv) {
                 solver.set_R_gimbal2world(q);
                 for (double bearing_deg : {-12., 0., 12.}) {
                     const double bearing = bearing_deg * CV_PI / 180;
-                    const Eigen::Vector3d position = q * Eigen::Vector3d(3 * std::cos(bearing),
-                                                                          3 * std::sin(bearing), 0.05);
+                    const Eigen::Vector3d position =
+                        q * Eigen::Vector3d(3 * std::cos(bearing), 3 * std::sin(bearing), 0.05);
                     for (double slant_deg : {-85., -80., -45., 0., 45., 80., 85.}) {
-                        const double yaw = tools::limit_rad(gimbal_yaw + bearing + slant_deg * CV_PI / 180);
+                        const double yaw =
+                            tools::limit_rad(gimbal_yaw + bearing + slant_deg * CV_PI / 180);
                         const auto points = solver.reproject_armor(position, yaw, type);
                         for (bool noisy : {false, true}) {
                             Armor armor(1, 1.0f, {}, points);
-                            // Hero big armor enters yaw optimization; balance armor deliberately does not.
+                            // 英雄的大装甲参与 yaw 优化；平衡步兵不使用固定安装倾角。
                             armor.type = type;
                             armor.name = type == ArmorType::big ? ArmorName::one : ArmorName::three;
                             if (noisy) {
@@ -56,18 +58,36 @@ int main(int argc, char** argv) {
                                 armor.points[3] += cv::Point2f(-0.20f, 0.10f);
                             }
                             require(solver.solve(armor), "Valid side-view armor failed to solve");
+                            require(armor.pose_valid, "Solved armor did not mark its pose valid");
+                            const auto rotation = solver.R_gimbal2world();
+                            require((rotation * armor.xyz_in_gimbal - armor.xyz_in_world).norm() <
+                                        1e-10,
+                                    "World and gimbal positions disagree");
+                            require((rotation * tools::rotation_matrix(armor.ypr_in_gimbal) -
+                                     tools::rotation_matrix(armor.ypr_in_world))
+                                            .norm() < 1e-10,
+                                    "Yaw optimization left a stale gimbal orientation");
+                            require(
+                                (tools::xyz2ypd(armor.xyz_in_world) - armor.ypd_in_world).norm() <
+                                    1e-10,
+                                "Final spherical coordinates disagree with world position");
                             const double before = error(solver, armor, armor.yaw_raw);
                             const double after = error(solver, armor, armor.ypr_in_world[0]);
-                            require(std::isfinite(before) && std::isfinite(after) && after <= before + 1e-6,
-                                    "Yaw optimization increased reprojection error relative to PnP");
-                            if (after + 1e-5 < before) ++improved;
+                            require(
+                                std::isfinite(before) && std::isfinite(after) &&
+                                    after <= before + 1e-6,
+                                "Yaw optimization increased reprojection error relative to PnP");
+                            if (after + 1e-5 < before)
+                                ++improved;
                             if (!noisy) {
-                                const double yaw_error = std::abs(tools::limit_rad(armor.ypr_in_world[0] - yaw));
+                                const double yaw_error =
+                                    std::abs(tools::limit_rad(armor.ypr_in_world[0] - yaw));
                                 largest_yaw_error = std::max(largest_yaw_error, yaw_error);
                                 require((armor.xyz_in_world - position).norm() < 1e-3,
                                         "Side-view armor position changed");
                                 require(yaw_error < 0.05 * CV_PI / 180,
-                                        "Yaw optimization clipped a correct side-view or wrapped PnP heading");
+                                        "Yaw optimization clipped a correct side-view or wrapped "
+                                        "PnP heading");
                             }
                             ++samples;
                         }
@@ -75,9 +95,24 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // 失败重解算必须使旧位姿失效；只读接口不得修改原始检测。
+        auto corners = solver.reproject_armor({-3, 0, 0}, -CV_PI, ArmorType::small);
+        Armor invalid(1, 1, {}, corners);
+        invalid.type = ArmorType::small;
+        invalid.name = ArmorName::two;
+        invalid.pose_valid = true;
+        invalid.points.fill({0, 0});
+        require(!solver.solve(invalid) && !invalid.pose_valid,
+                "Failed solve retained a valid pose flag");
+        Armor detection(1, 1, {}, corners);
+        detection.name = ArmorName::two;
+        const auto resolved = solver.resolve_observation(detection);
+        require(resolved && resolved->armor().pose_valid && !detection.pose_valid,
+                "Readonly resolution mutated detection or omitted its solved pose");
         require(improved > 0, "Yaw search never improved any noisy observation");
         std::cout << "PASS yaw optimization: " << samples << " observations, " << improved
-                  << " improved; largest exact yaw error=" << largest_yaw_error * 180 / CV_PI << " deg\n";
+                  << " improved; largest exact yaw error=" << largest_yaw_error * 180 / CV_PI
+                  << " deg\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

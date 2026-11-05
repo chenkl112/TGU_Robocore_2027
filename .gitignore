@@ -1,7 +1,9 @@
 .idea/
 .cache/
-.github/
 .venv-openvino/
+.venv-format/
+__pycache__/
+*.py[cod]
 
 tmp/
 build/

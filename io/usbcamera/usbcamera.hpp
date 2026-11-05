@@ -12,6 +12,8 @@
 #include <thread>
 #include <variant>
 
+#include "io/device_config.hpp"
+
 namespace io {
 
 // 用法:
@@ -24,20 +26,21 @@ namespace io {
 //   std::chrono::steady_clock::time_point t;
 //   cam.read(img, t);
 class USBCamera {
-public:
+  public:
+    explicit USBCamera(const CameraConfig& config);
     explicit USBCamera(int device_index, int width = 0, int height = 0, double fps = 0.0);
-    explicit USBCamera(
-        const std::string& source, int width = 0, int height = 0, double fps = 0.0);
-    explicit USBCamera(
-        const std::variant<int, std::string>& source, int width = 0, int height = 0,
-        double fps = 0.0);
+    explicit USBCamera(const std::string& source, int width = 0, int height = 0, double fps = 0.0);
+    explicit USBCamera(const std::variant<int, std::string>& source, int width = 0, int height = 0,
+                       double fps = 0.0);
     ~USBCamera();
 
     void read(cv::Mat& img, std::chrono::steady_clock::time_point& timestamp);
     void stop();
-    bool ok() const { return ok_; }
+    bool ok() const {
+        return ok_;
+    }
 
-private:
+  private:
     void open(const std::variant<int, std::string>& src, int width, int height, double fps);
     void capture_thread();
 
@@ -59,6 +62,6 @@ private:
     std::atomic<bool> ok_{false};
 };
 
-}  // namespace io
+} // namespace io
 
-#endif  // TGU_ROBOCORE_2027_USBCAMERA_HPP
+#endif // TGU_ROBOCORE_2027_USBCAMERA_HPP

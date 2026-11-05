@@ -1,19 +1,17 @@
 //
-// Created by tgu on 2026/4/14.
+// 由 tgu 创建于 2026/4/14。
 //
 
 #include "tools/logger.hpp"
 
 int main() {
-    tools::LoggerConfig cfg{
-        .level = tools::LogLevel::Debug,
-        .enable_console = true,
-        .enable_file = false,
-        .file_path = "logs.txt"
-    };
+    tools::LoggerConfig cfg{.level = tools::LogLevel::Debug,
+                            .enable_console = true,
+                            .enable_file = false,
+                            .file_path = "logs.txt"};
 
     tools::Logger::instance().init(cfg);
-    static constexpr const char *MODULE = "TEST";
+    static constexpr const char* MODULE = "TEST";
 
     int a = 114514;
     float b = 1919.810;

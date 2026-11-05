@@ -17,17 +17,20 @@ struct AimPoint {
     Eigen::Vector4d xyza = Eigen::Vector4d::Zero();
 };
 
+struct AimerConfig;
+
 class Aimer {
-public:
+  public:
     AimPoint debug_aim_point;
 
     explicit Aimer(const std::string& config_path);
+    explicit Aimer(const AimerConfig& config);
 
-    io::Command aim(
-        std::list<Target> targets, std::chrono::steady_clock::time_point timestamp,
-        double bullet_speed, bool to_now = true);
+    io::Command aim(const std::list<Target>& targets,
+                    std::chrono::steady_clock::time_point timestamp, double bullet_speed,
+                    bool to_now = true);
 
-private:
+  private:
     double yaw_offset_;
     double pitch_offset_;
     double coming_angle_;
@@ -37,9 +40,9 @@ private:
     double low_speed_delay_time_;
     double decision_speed_;
 
-    AimPoint choose_aim_point(const Target& target);
+    AimPoint choose_aim_point(const TargetSnapshot& target);
 };
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim
 
-#endif  // TGU_ROBOCORE_2027_AIMER_HPP
+#endif // TGU_ROBOCORE_2027_AIMER_HPP

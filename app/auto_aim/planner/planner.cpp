@@ -3,84 +3,179 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
-#include <vector>
 
-#include "tools/logger.hpp"
-#include "tools/math_tools.hpp"
-#include "tools/tomlpp.hpp"
-#include "tools/trajectory.hpp"
+#include "../config.hpp"
 #include "tinympc/admm.hpp"
-
-static constexpr const char* MODULE = "AUTO_AIM";
-
-using namespace std::chrono_literals;
+#include "tinympc/tiny_api.hpp"
+#include "tools/math_tools.hpp"
+#include "tools/trajectory.hpp"
 
 namespace app::auto_aim {
-
-// Allow changing references to converge while keeping per-frame work bounded.
+namespace {
+// 固定迭代上限兼顾参考变化时的收敛和单帧计算量，保留跨帧热启动。
 constexpr int MAX_SOLVER_ITERATIONS = 100;
 constexpr double SOLVER_RHO = 30.0;
 constexpr int SHOOT_OFFSET = 2;
 
-namespace {
 bool facing_gimbal(const Eigen::Vector4d& armor) {
     return armor.x() * std::cos(armor.w()) + armor.y() * std::sin(armor.w()) > 0;
 }
-}  // namespace
 
-Planner::Planner(const std::string& config_path) {
-    auto config = toml::parse_file(config_path);
-    yaw_offset_ = config["planner"]["yaw_offset"].value_or(0.0) / 57.3;
-    pitch_offset_ = config["planner"]["pitch_offset"].value_or(0.0) / 57.3;
-    fire_thresh_ = config["planner"]["fire_thresh"].value_or(0.05);
-    decision_speed_ = config["planner"]["decision_speed"].value_or(7.0);
-    high_speed_delay_time_ = config["planner"]["high_speed_delay_time"].value_or(0.12);
-    low_speed_delay_time_ = config["planner"]["low_speed_delay_time"].value_or(0.12);
+struct InterceptionFailure {
+    StopReason reason;
+};
 
-    const int feedback_timeout_ms = config["gimbal"]["feedback_timeout_ms"].value_or(100);
-    if (feedback_timeout_ms <= 0) throw std::runtime_error("gimbal.feedback_timeout_ms must be positive");
-    feedback_timeout_ = std::chrono::milliseconds(feedback_timeout_ms);
-    max_target_age_ = config["planner"]["max_target_age"].value_or(0.1);
-    if (!std::isfinite(max_target_age_) || max_target_age_ <= 0) {
-        throw std::runtime_error("planner.max_target_age must be finite and positive");
-    }
-    for (const double value : {yaw_offset_, pitch_offset_, fire_thresh_, decision_speed_,
-                               high_speed_delay_time_, low_speed_delay_time_}) {
-        if (!std::isfinite(value)) throw std::runtime_error("planner parameters must be finite");
-    }
-    if (high_speed_delay_time_ < 0 || low_speed_delay_time_ < 0 || fire_thresh_ < 0) {
-        throw std::runtime_error("planner delays and fire threshold must be nonnegative");
-    }
-    try {
-        setup_yaw_solver(config_path);
-        setup_pitch_solver(config_path);
-    } catch (...) {
-        cleanup();
-        throw;
-    }
+Plan stopped(StopReason reason) {
+    Plan result;
+    result.reason = reason;
+    return result;
 }
 
-Planner::~Planner() { cleanup(); }
-
-void Planner::cleanup() {
-    for (auto solver : {yaw_solver_, pitch_solver_}) {
-        if (!solver) continue;
+struct SolverDeleter {
+    void operator()(TinySolver* solver) const {
+        if (!solver)
+            return;
         delete solver->solution;
         delete solver->cache;
         delete solver->settings;
         delete solver->work;
         delete solver;
     }
-    yaw_solver_ = pitch_solver_ = nullptr;
+};
+} // namespace
+
+const char* stop_reason_name(StopReason reason) {
+    switch (reason) {
+    case StopReason::none:
+        return "none";
+    case StopReason::no_target:
+        return "no_target";
+    case StopReason::invalid_target:
+        return "invalid_target";
+    case StopReason::future_state:
+        return "future_state";
+    case StopReason::expired_state:
+        return "expired_state";
+    case StopReason::future_observation:
+        return "future_observation";
+    case StopReason::expired_observation:
+        return "expired_observation";
+    case StopReason::invalid_bullet_speed:
+        return "invalid_bullet_speed";
+    case StopReason::no_visible_armor:
+        return "no_visible_armor";
+    case StopReason::ballistic_unreachable:
+        return "ballistic_unreachable";
+    case StopReason::solver_not_converged:
+        return "solver_not_converged";
+    case StopReason::invalid_solution:
+        return "invalid_solution";
+    }
+    return "unknown";
 }
 
-Plan Planner::plan(Target target, double bullet_speed, std::optional<io::GimbalState> feedback) {
-    const auto state = target.ekf_x();
-    if (state.size() != 11 || !state.allFinite() || !std::isfinite(bullet_speed)) return {false};
-    if (bullet_speed < 10 || bullet_speed > 25) {
-        bullet_speed = 22;
+// 一根轴独立拥有求解器及热启动状态，yaw/pitch 共用初始化与约束投影逻辑。
+class Planner::AxisSolver {
+  public:
+    explicit AxisSolver(const MpcAxisConfig& config) {
+        const Eigen::Matrix2d A{{1, DT}, {0, 1}};
+        const Eigen::Vector2d B{0, DT};
+        const Eigen::Vector2d Q{config.Q[0], config.Q[1]};
+        const Eigen::Matrix<double, 1, 1> R = Eigen::Matrix<double, 1, 1>::Constant(config.R);
+        TinySolver* raw = nullptr;
+        const int status = tiny_setup(&raw, A, B, Eigen::Vector2d::Zero(), Q.asDiagonal(), R,
+                                      SOLVER_RHO, 2, 1, HORIZON, 0);
+        solver_.reset(raw);
+        if (status != 0)
+            throw std::runtime_error("Failed to initialize MPC axis solver");
+        const int bounds =
+            tiny_set_bound_constraints(raw, Eigen::MatrixXd::Constant(2, HORIZON, -1e17),
+                                       Eigen::MatrixXd::Constant(2, HORIZON, 1e17),
+                                       Eigen::MatrixXd::Constant(1, HORIZON - 1, -config.max_acc),
+                                       Eigen::MatrixXd::Constant(1, HORIZON - 1, config.max_acc));
+        if (bounds != 0)
+            throw std::runtime_error("Failed to initialize MPC axis bounds");
+        solver_->settings->max_iter = MAX_SOLVER_ITERATIONS;
     }
 
+    bool solve(const Eigen::Matrix<double, 2, HORIZON>& reference) {
+        tiny_set_x0(solver_.get(), reference.col(0));
+        solver_->work->Xref = reference;
+        update_linear_cost(solver_.get());
+        return tiny_solve(solver_.get()) == 0;
+    }
+
+    bool finite_input() const {
+        return solver_->solution->u.allFinite();
+    }
+    double acceleration(int time) const {
+        return solver_->solution->u(0, time);
+    }
+
+    Eigen::Matrix<double, 2, HORIZON> rollout() const {
+        // ADMM 内部输入在收敛前可能超限；只使用投影后的输入重建可发送轨迹。
+        Eigen::Matrix<double, 2, HORIZON> state = solver_->work->x;
+        for (int i = 1; i < HORIZON; ++i) {
+            state.col(i) = solver_->work->Adyn * state.col(i - 1) +
+                           solver_->work->Bdyn * solver_->solution->u.col(i - 1);
+        }
+        return state;
+    }
+
+  private:
+    std::unique_ptr<TinySolver, SolverDeleter> solver_;
+};
+
+Planner::Planner(const std::string& config_path) : Planner(load_planner_config(config_path)) {}
+
+Planner::Planner(const PlannerConfig& config)
+    : max_target_age_(config.max_target_age), feedback_timeout_(config.feedback_timeout),
+      yaw_offset_(config.yaw_offset), pitch_offset_(config.pitch_offset),
+      fire_thresh_(config.fire_thresh), low_speed_delay_time_(config.low_speed_delay_time),
+      high_speed_delay_time_(config.high_speed_delay_time), decision_speed_(config.decision_speed) {
+    validate(config);
+    yaw_solver_ = std::make_unique<AxisSolver>(config.yaw);
+    pitch_solver_ = std::make_unique<AxisSolver>(config.pitch);
+}
+
+Planner::~Planner() = default;
+
+Plan Planner::plan(const std::optional<TargetSnapshot>& target, double bullet_speed,
+                   TargetClock::time_point now, std::optional<io::GimbalState> feedback) {
+    debug_xyza.setZero();
+    if (!target)
+        return stopped(StopReason::no_target);
+    if (!target->valid())
+        return stopped(StopReason::invalid_target);
+    const double age = target_time::seconds_between(now, target->timestamp());
+    const double observation_age =
+        target_time::seconds_between(now, target->observation_timestamp());
+    if (age < 0)
+        return stopped(StopReason::future_state);
+    if (age > max_target_age_)
+        return stopped(StopReason::expired_state);
+    if (observation_age < 0)
+        return stopped(StopReason::future_observation);
+    if (observation_age > max_target_age_)
+        return stopped(StopReason::expired_observation);
+    if (!std::isfinite(bullet_speed))
+        return stopped(StopReason::invalid_bullet_speed);
+    if (bullet_speed < 10 || bullet_speed > 25)
+        bullet_speed = 22;
+    const double delay = std::abs(target->state[target_state::YawRate]) > decision_speed_
+                             ? high_speed_delay_time_
+                             : low_speed_delay_time_;
+    // 规划只外推固定维度运动学状态，不推进 EKF 协方差或观测时间。
+    try {
+        return solve(target->predicted(age + delay), bullet_speed, now, feedback);
+    } catch (const std::invalid_argument&) {
+        // 极端录包时间若无法容纳预测时域，应停控而不是使整个控制线程退出。
+        return stopped(StopReason::invalid_target);
+    }
+}
+
+Plan Planner::solve(const TargetSnapshot& target, double bullet_speed, TargetClock::time_point now,
+                    const std::optional<io::GimbalState>& feedback) {
     double yaw0;
     Trajectory traj;
     bool fire_visible = false;
@@ -89,199 +184,72 @@ Plan Planner::plan(Target target, double bullet_speed, std::optional<io::GimbalS
         yaw0 = interception.angles(0);
         debug_xyza = interception.armor;
         traj = get_trajectory(target, yaw0, bullet_speed, fire_visible);
-    } catch (const std::exception& e) {
-        LOG_WARN(MODULE, "Unsolvable target {:.2f}", bullet_speed);
-        return {false};
+    } catch (const InterceptionFailure& failure) {
+        return stopped(failure.reason);
     }
+    if (!traj.allFinite() || !std::isfinite(yaw0))
+        return stopped(StopReason::invalid_solution);
 
-    if (!traj.allFinite() || !std::isfinite(yaw0)) return {false};
-
-    Eigen::VectorXd x0(2);
-    x0 << traj(0, 0), traj(1, 0);
-    tiny_set_x0(yaw_solver_, x0);
-
-    yaw_solver_->work->Xref = traj.block(0, 0, 2, HORIZON);
-    update_linear_cost(yaw_solver_);
-    const int yaw_status = tiny_solve(yaw_solver_);
-
-    x0 << traj(2, 0), traj(3, 0);
-    tiny_set_x0(pitch_solver_, x0);
-
-    pitch_solver_->work->Xref = traj.block(2, 0, 2, HORIZON);
-    update_linear_cost(pitch_solver_);
-    const int pitch_status = tiny_solve(pitch_solver_);
-    // A finite, acceleration-limited rollout can still point far from the
-    // target when ADMM has not converged. Reject the entire command, while
-    // retaining both solvers' warm-start state for the next frame.
-    if (yaw_status != 0 || pitch_status != 0) return {};
-    if (!yaw_solver_->solution->u.allFinite() || !pitch_solver_->solution->u.allFinite()) return {false};
-
-    // ADMM's work->u is unconstrained until convergence. Roll out the projected
-    // inputs so both the transmitted acceleration and angles respect the bounds.
-    auto rollout = [](TinySolver* solver) -> Eigen::MatrixXd {
-        Eigen::MatrixXd x = solver->work->x;
-        for (int i = 1; i < HORIZON; ++i) {
-            x.col(i) = solver->work->Adyn * x.col(i - 1) +
-                       solver->work->Bdyn * solver->solution->u.col(i - 1);
-        }
-        return x;
-    };
-    const auto yaw_x = rollout(yaw_solver_);
-    const auto pitch_x = rollout(pitch_solver_);
-    if (!yaw_x.allFinite() || !pitch_x.allFinite()) return {false};
+    // 两轴都执行一次，以保留原有热启动和恢复行为；不能用短路表达式跳过 pitch。
+    const bool yaw_converged = yaw_solver_->solve(traj.topRows<2>());
+    const bool pitch_converged = pitch_solver_->solve(traj.bottomRows<2>());
+    if (!yaw_converged || !pitch_converged)
+        return stopped(StopReason::solver_not_converged);
+    if (!yaw_solver_->finite_input() || !pitch_solver_->finite_input()) {
+        return stopped(StopReason::invalid_solution);
+    }
+    const auto yaw_x = yaw_solver_->rollout();
+    const auto pitch_x = pitch_solver_->rollout();
+    if (!yaw_x.allFinite() || !pitch_x.allFinite())
+        return stopped(StopReason::invalid_solution);
 
     Plan plan;
     plan.control = true;
-
+    plan.reason = StopReason::none;
     plan.target_yaw = tools::limit_rad(traj(0, HALF_HORIZON) + yaw0);
     plan.target_pitch = traj(2, HALF_HORIZON);
-
     plan.yaw = tools::limit_rad(yaw_x(0, HALF_HORIZON) + yaw0);
     plan.yaw_vel = yaw_x(1, HALF_HORIZON);
-    plan.yaw_acc = yaw_solver_->solution->u(0, HALF_HORIZON);
-
+    plan.yaw_acc = yaw_solver_->acceleration(HALF_HORIZON);
     plan.pitch = pitch_x(0, HALF_HORIZON);
     plan.pitch_vel = pitch_x(1, HALF_HORIZON);
-    plan.pitch_acc = pitch_solver_->solution->u(0, HALF_HORIZON);
+    plan.pitch_acc = pitch_solver_->acceleration(HALF_HORIZON);
 
-    const auto now = std::chrono::steady_clock::now();
     const bool aligned = feedback && feedback->received_at <= now &&
-        now - feedback->received_at <= feedback_timeout_ &&
-        std::isfinite(feedback->yaw) && std::isfinite(feedback->pitch) &&
-        std::hypot(tools::limit_rad(plan.target_yaw - feedback->yaw),
-                   plan.target_pitch - feedback->pitch) < fire_thresh_;
-    plan.fire = aligned && target.observed && fire_visible && std::hypot(
-                    traj(0, HALF_HORIZON + SHOOT_OFFSET)
-                        - yaw_x(0, HALF_HORIZON + SHOOT_OFFSET),
-                    traj(2, HALF_HORIZON + SHOOT_OFFSET)
-                        - pitch_x(0, HALF_HORIZON + SHOOT_OFFSET))
-                < fire_thresh_;
+                         target_time::seconds_between(now, feedback->received_at) <=
+                             std::chrono::duration<double>(feedback_timeout_).count() &&
+                         std::isfinite(feedback->yaw) && std::isfinite(feedback->pitch) &&
+                         std::hypot(tools::limit_rad(plan.target_yaw - feedback->yaw),
+                                    plan.target_pitch - feedback->pitch) < fire_thresh_;
+    plan.fire =
+        aligned && target.observed && fire_visible &&
+        std::hypot(traj(0, HALF_HORIZON + SHOOT_OFFSET) - yaw_x(0, HALF_HORIZON + SHOOT_OFFSET),
+                   traj(2, HALF_HORIZON + SHOOT_OFFSET) - pitch_x(0, HALF_HORIZON + SHOOT_OFFSET)) <
+            fire_thresh_;
     return plan;
 }
 
-Plan Planner::plan(std::optional<Target> target, double bullet_speed,
-                   std::chrono::steady_clock::time_point now, std::optional<io::GimbalState> feedback) {
-    if (!target.has_value()) return {false};
-    const double age = std::chrono::duration<double>(now - target->timestamp()).count();
-    const double observation_age = std::chrono::duration<double>(now - target->observation_timestamp()).count();
-    const auto state = target->ekf_x();
-    if (age < 0 || age > max_target_age_ || observation_age < 0 || observation_age > max_target_age_ || state.size() != 11 || !state.allFinite()) return {false};
-
-    double delay_time = std::abs(target->ekf_x()[7]) > decision_speed_ ? high_speed_delay_time_
-                                                                       : low_speed_delay_time_;
-
-    auto future =
-        now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(delay_time));
-
-    target->predict(future);
-
-    return plan(*target, bullet_speed, feedback);
-}
-
-void Planner::setup_yaw_solver(const std::string& config_path) {
-    auto config = toml::parse_file(config_path);
-    auto max_yaw_acc = config["planner"]["max_yaw_acc"].value_or(50.0);
-
-    auto Q_yaw_arr = config["planner"]["Q_yaw"].as_array();
-    auto R_yaw_arr = config["planner"]["R_yaw"].as_array();
-    std::vector<double> Q_yaw, R_yaw;
-    if (Q_yaw_arr) {
-        for (auto& v : *Q_yaw_arr) Q_yaw.push_back(v.value_or(0.0));
-    }
-    if (R_yaw_arr) {
-        for (auto& v : *R_yaw_arr) R_yaw.push_back(v.value_or(0.0));
-    }
-    if (Q_yaw.size() != 2 || R_yaw.size() != 1) {
-        throw std::runtime_error("planner.Q_yaw must contain 2 values and R_yaw 1 value");
-    }
-
-    if (!std::isfinite(max_yaw_acc) || max_yaw_acc <= 0 ||
-        !std::isfinite(Q_yaw[0]) || !std::isfinite(Q_yaw[1]) ||
-        !std::isfinite(R_yaw[0]) || Q_yaw[0] < 0 || Q_yaw[1] < 0 || R_yaw[0] <= 0) {
-        throw std::runtime_error("invalid yaw MPC costs or acceleration bound");
-    }
-
-    Eigen::MatrixXd A{{1, DT}, {0, 1}};
-    Eigen::MatrixXd B{{0}, {DT}};
-    Eigen::VectorXd f{{0, 0}};
-    Eigen::Matrix<double, 2, 1> Q(Q_yaw.data());
-    Eigen::Matrix<double, 1, 1> R(R_yaw.data());
-    if (tiny_setup(
-            &yaw_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), SOLVER_RHO, 2, 1,
-            HORIZON, 0) != 0) {
-        throw std::runtime_error("failed to initialize yaw MPC solver");
-    }
-
-    Eigen::MatrixXd x_min = Eigen::MatrixXd::Constant(2, HORIZON, -1e17);
-    Eigen::MatrixXd x_max = Eigen::MatrixXd::Constant(2, HORIZON, 1e17);
-    Eigen::MatrixXd u_min = Eigen::MatrixXd::Constant(1, HORIZON - 1, -max_yaw_acc);
-    Eigen::MatrixXd u_max = Eigen::MatrixXd::Constant(1, HORIZON - 1, max_yaw_acc);
-    tiny_set_bound_constraints(yaw_solver_, x_min, x_max, u_min, u_max);
-
-    yaw_solver_->settings->max_iter = MAX_SOLVER_ITERATIONS;
-}
-
-void Planner::setup_pitch_solver(const std::string& config_path) {
-    auto config = toml::parse_file(config_path);
-    auto max_pitch_acc = config["planner"]["max_pitch_acc"].value_or(50.0);
-
-    auto Q_pitch_arr = config["planner"]["Q_pitch"].as_array();
-    auto R_pitch_arr = config["planner"]["R_pitch"].as_array();
-    std::vector<double> Q_pitch, R_pitch;
-    if (Q_pitch_arr) {
-        for (auto& v : *Q_pitch_arr) Q_pitch.push_back(v.value_or(0.0));
-    }
-    if (R_pitch_arr) {
-        for (auto& v : *R_pitch_arr) R_pitch.push_back(v.value_or(0.0));
-    }
-    if (Q_pitch.size() != 2 || R_pitch.size() != 1) {
-        throw std::runtime_error("planner.Q_pitch must contain 2 values and R_pitch 1 value");
-    }
-
-    if (!std::isfinite(max_pitch_acc) || max_pitch_acc <= 0 ||
-        !std::isfinite(Q_pitch[0]) || !std::isfinite(Q_pitch[1]) ||
-        !std::isfinite(R_pitch[0]) || Q_pitch[0] < 0 || Q_pitch[1] < 0 || R_pitch[0] <= 0) {
-        throw std::runtime_error("invalid pitch MPC costs or acceleration bound");
-    }
-
-    Eigen::MatrixXd A{{1, DT}, {0, 1}};
-    Eigen::MatrixXd B{{0}, {DT}};
-    Eigen::VectorXd f{{0, 0}};
-    Eigen::Matrix<double, 2, 1> Q(Q_pitch.data());
-    Eigen::Matrix<double, 1, 1> R(R_pitch.data());
-    if (tiny_setup(
-            &pitch_solver_, A, B, f, Q.asDiagonal(), R.asDiagonal(), SOLVER_RHO, 2, 1,
-            HORIZON, 0) != 0) {
-        throw std::runtime_error("failed to initialize pitch MPC solver");
-    }
-
-    Eigen::MatrixXd x_min = Eigen::MatrixXd::Constant(2, HORIZON, -1e17);
-    Eigen::MatrixXd x_max = Eigen::MatrixXd::Constant(2, HORIZON, 1e17);
-    Eigen::MatrixXd u_min = Eigen::MatrixXd::Constant(1, HORIZON - 1, -max_pitch_acc);
-    Eigen::MatrixXd u_max = Eigen::MatrixXd::Constant(1, HORIZON - 1, max_pitch_acc);
-    tiny_set_bound_constraints(pitch_solver_, x_min, x_max, u_min, u_max);
-
-    pitch_solver_->settings->max_iter = MAX_SOLVER_ITERATIONS;
-}
-
-Planner::Interception Planner::aim(const Target& target, double bullet_speed,
+Planner::Interception Planner::aim(const TargetSnapshot& target, double bullet_speed,
                                    std::optional<std::size_t> armor_id, bool require_visible) {
-    // Solve each physical armor separately: switching armor IDs inside the root
-    // search makes flight time discontinuous when alternating plates have different z.
+    // 对每块物理装甲分别求拦截根；异高装甲在求根中切换会造成飞行时间不连续。
     const auto armors = target.armor_xyza_list();
     double best_distance = std::numeric_limits<double>::infinity();
     bool best_facing = false;
     Interception interception;
+    bool converged_trajectory = false;
     for (std::size_t id = 0; id < armors.size(); ++id) {
-        if (armor_id && id != *armor_id) continue;
+        if (armor_id && id != *armor_id)
+            continue;
         Eigen::Vector4d armor;
         auto evaluate = [&](double time) {
             armor = target.armor_xyza_list(time)[id];
-            if (!armor.allFinite()) return tools::Trajectory(0, 0, 0);
+            if (!armor.allFinite())
+                return tools::Trajectory(0, 0, 0);
             return tools::Trajectory(bullet_speed, armor.head<2>().norm(), armor.z());
         };
         const auto initial = evaluate(0);
-        if (initial.unsolvable) continue;
+        if (initial.unsolvable)
+            continue;
         double lower = 0;
         double upper = initial.fly_time;
         auto trajectory = evaluate(upper);
@@ -289,65 +257,77 @@ Planner::Interception Planner::aim(const Target& target, double bullet_speed,
             upper *= 1.5;
             trajectory = evaluate(upper);
         }
-        if (trajectory.unsolvable || trajectory.fly_time > upper) continue;
+        if (trajectory.unsolvable || trajectory.fly_time > upper)
+            continue;
         bool converged = false;
         for (int i = 0; i < 50; ++i) {
             const double time = (lower + upper) * 0.5;
             trajectory = evaluate(time);
-            if (trajectory.unsolvable) break;
-            if (std::abs(trajectory.fly_time - time) < 1e-7) { converged = true; break; }
-            if (trajectory.fly_time > time) lower = time;
-            else upper = time;
+            if (trajectory.unsolvable)
+                break;
+            if (std::abs(trajectory.fly_time - time) < 1e-7) {
+                converged = true;
+                break;
+            }
+            if (trajectory.fly_time > time)
+                lower = time;
+            else
+                upper = time;
         }
-        if (!converged) continue;
+        if (!converged)
+            continue;
+        converged_trajectory = true;
         const bool facing = facing_gimbal(armor);
         if (!armor_id) {
-            if ((require_visible && !facing) || (best_facing && !facing)) continue;
-            if (facing == best_facing && armor.head<2>().norm() >= best_distance) continue;
-        } else if (armor.head<2>().norm() >= best_distance) continue;
+            if ((require_visible && !facing) || (best_facing && !facing))
+                continue;
+            if (facing == best_facing && armor.head<2>().norm() >= best_distance)
+                continue;
+        } else if (armor.head<2>().norm() >= best_distance)
+            continue;
         best_distance = armor.head<2>().norm();
         best_facing = facing;
         interception.armor = armor;
         interception.armor_id = id;
         interception.angles << tools::limit_rad(std::atan2(armor.y(), armor.x()) + yaw_offset_),
-                  -trajectory.pitch - pitch_offset_;
+            -trajectory.pitch - pitch_offset_;
     }
-    if (!std::isfinite(best_distance)) throw std::runtime_error("No converged interception trajectory");
+    if (!std::isfinite(best_distance)) {
+        throw InterceptionFailure{converged_trajectory ? StopReason::no_visible_armor
+                                                       : StopReason::ballistic_unreachable};
+    }
     return interception;
 }
 
-Trajectory Planner::get_trajectory(const Target& target, double yaw0, double bullet_speed,
+Trajectory Planner::get_trajectory(const TargetSnapshot& target, double yaw0, double bullet_speed,
                                    bool& fire_visible) {
     Trajectory traj;
-    auto previous = target;
-    previous.predict(-DT * (HALF_HORIZON + 1));
-    auto current = previous;
-    current.predict(DT);
-    // A two-plate target can expose neither plate in a horizon tail. Those
-    // samples still define a smoothing objective; only the actual interception
-    // and firing sample must face the gimbal. Prefer facing plates whenever one
-    // exists so the central reference agrees with the selected interception.
+    auto previous = target.predicted(-DT * (HALF_HORIZON + 1));
+    auto current = previous.predicted(DT);
+    // 两装甲目标在时域尾部可能全部背向云台。尾部仍参与平滑，实际拦截与
+    // 发弹采样必须可见；存在可见装甲时始终优先它，保持中央参考点一致。
     auto before = aim(previous, bullet_speed, std::nullopt, false);
     auto interception = aim(current, bullet_speed, std::nullopt, false);
     double last_yaw = yaw0;
     double relative_yaw = 0;
     for (int i = 0; i < HORIZON; ++i) {
-        auto next = current;
-        next.predict(DT);
+        auto next = current.predicted(DT);
         const auto after = aim(next, bullet_speed, std::nullopt, false);
-        // Keep the nearest physical plate as the angle reference. Estimate its
-        // own velocity, rather than interpreting a plate handoff as instantaneous
-        // motion. Reuse adjacent roots whenever the selected plate is unchanged.
-        const auto before_angles = before.armor_id == interception.armor_id ? before.angles :
-            aim(previous, bullet_speed, interception.armor_id).angles;
-        const auto after_angles = after.armor_id == interception.armor_id ? after.angles :
-            aim(next, bullet_speed, interception.armor_id).angles;
+        // 角速度使用同一块装甲的前后位置，避免把换板误认为瞬时运动。
+        // 选中的装甲未变时复用邻近拦截根。
+        const auto before_angles = before.armor_id == interception.armor_id
+                                       ? before.angles
+                                       : aim(previous, bullet_speed, interception.armor_id).angles;
+        const auto after_angles = after.armor_id == interception.armor_id
+                                      ? after.angles
+                                      : aim(next, bullet_speed, interception.armor_id).angles;
         const auto& angles = interception.angles;
         relative_yaw += tools::limit_rad(angles.x() - last_yaw);
         traj.col(i) << relative_yaw,
-                       tools::limit_rad(after_angles.x() - before_angles.x()) / (2 * DT),
-                       angles.y(), (after_angles.y() - before_angles.y()) / (2 * DT);
-        if (i == HALF_HORIZON + SHOOT_OFFSET) fire_visible = facing_gimbal(interception.armor);
+            tools::limit_rad(after_angles.x() - before_angles.x()) / (2 * DT), angles.y(),
+            (after_angles.y() - before_angles.y()) / (2 * DT);
+        if (i == HALF_HORIZON + SHOOT_OFFSET)
+            fire_visible = facing_gimbal(interception.armor);
         last_yaw = angles.x();
         previous = std::move(current);
         current = std::move(next);
@@ -357,4 +337,4 @@ Trajectory Planner::get_trajectory(const Target& target, double yaw0, double bul
     return traj;
 }
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim

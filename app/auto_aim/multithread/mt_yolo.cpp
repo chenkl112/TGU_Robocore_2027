@@ -3,61 +3,84 @@
 #include "tools/logger.hpp"
 
 namespace app::auto_aim {
-
-static constexpr const char* MODULE = "MT_YOLO";
+namespace {
+constexpr const char* MODULE = "MT_YOLO";
+}
 
 MultiThreadYOLO::MultiThreadYOLO(const std::string& config_path, bool debug)
-    : yolo_(config_path, debug) {
-    thread_ = std::thread(&MultiThreadYOLO::worker, this);
+    : MultiThreadYOLO(load_vision_config(config_path), debug) {}
+
+MultiThreadYOLO::MultiThreadYOLO(const VisionConfig& config, bool debug)
+    : MultiThreadYOLO(config.yolo, config.classifier, debug) {}
+
+MultiThreadYOLO::MultiThreadYOLO(const YoloConfig& config, const ClassifierConfig& classifier,
+                                 bool debug)
+    : yolo_(config, classifier, debug), thread_([this](std::stop_token stop) { worker(stop); }) {
     LOG_INFO(MODULE, "[MultiThreadYOLO] started.");
 }
 
 MultiThreadYOLO::~MultiThreadYOLO() {
-    quit_ = true;
-    in_queue_.push({cv::Mat(), std::chrono::steady_clock::now()});
-    if (thread_.joinable()) thread_.join();
+    stop();
+    if (thread_.joinable())
+        thread_.join();
 }
 
-void MultiThreadYOLO::push(cv::Mat img, std::chrono::steady_clock::time_point t) {
-    check_error();
-    in_queue_.push({std::move(img), t});
+void MultiThreadYOLO::stop() {
+    thread_.request_stop();
+    input_.close();
+    output_.close();
 }
 
-MultiThreadYOLO::FrameOut MultiThreadYOLO::pop() {
+bool MultiThreadYOLO::push(cv::Mat image, std::chrono::steady_clock::time_point timestamp,
+                           std::uint64_t session) {
     check_error();
-    auto result = out_queue_.pop();
+    return input_.push({std::move(image), timestamp, session});
+}
+
+DetectionFrame MultiThreadYOLO::pop() {
+    auto result = wait_pop({});
+    if (!result)
+        throw tools::QueueClosed();
+    return std::move(*result);
+}
+
+std::optional<DetectionFrame> MultiThreadYOLO::wait_pop(std::stop_token stop) {
+    check_error();
+    auto result = output_.wait_pop(stop);
     check_error();
     return result;
 }
 
 bool MultiThreadYOLO::empty() {
     check_error();
-    return out_queue_.empty();
+    return output_.empty();
 }
 
 void MultiThreadYOLO::check_error() {
     std::lock_guard lock(error_mutex_);
-    if (error_) std::rethrow_exception(error_);
+    if (error_)
+        std::rethrow_exception(error_);
 }
 
-void MultiThreadYOLO::worker() {
+void MultiThreadYOLO::worker(std::stop_token stop) {
     try {
-        while (!quit_) {
-            auto [img, t] = in_queue_.pop();
-            if (quit_ || img.empty()) continue;
-
-            auto armors = yolo_.detect(img);
-            out_queue_.push({std::move(armors), t});
+        while (auto frame = input_.wait_pop(stop)) {
+            if (stop.stop_requested())
+                break;
+            if (frame->image.empty())
+                continue;
+            auto armors = yolo_.detect(frame->image);
+            if (!output_.push({std::move(armors), frame->timestamp, frame->session}))
+                break;
         }
     } catch (...) {
-        {
-            std::lock_guard lock(error_mutex_);
-            error_ = std::current_exception();
-        }
-        // Wake a consumer already blocked in pop(), which rethrows the error.
-        out_queue_.push(FrameOut{std::list<Armor>{}, std::chrono::steady_clock::now()});
+        std::lock_guard lock(error_mutex_);
+        error_ = std::current_exception();
     }
+    // 包括失败路径：所有消费者都能结束等待，随后读取同一份异常状态。
+    input_.close();
+    output_.close();
     LOG_INFO(MODULE, "[MultiThreadYOLO] stopped.");
 }
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim

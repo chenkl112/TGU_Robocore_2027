@@ -12,15 +12,17 @@
 
 namespace app::auto_aim {
 
+struct ShooterConfig;
+
 class Shooter {
-public:
+  public:
     explicit Shooter(const std::string& config_path);
+    explicit Shooter(const ShooterConfig& config);
 
-    bool shoot(
-        const io::Command& command, const Aimer& aimer,
-        const std::list<Target>& targets, const Eigen::Vector3d& gimbal_position);
+    bool shoot(const io::Command& command, const Aimer& aimer, const std::list<Target>& targets,
+               const Eigen::Vector3d& gimbal_position);
 
-private:
+  private:
     io::Command last_command_;
     double judge_distance_;
     double first_tolerance_;
@@ -28,6 +30,6 @@ private:
     bool auto_fire_;
 };
 
-}  // namespace app::auto_aim
+} // namespace app::auto_aim
 
-#endif  // TGU_ROBOCORE_2027_SHOOTER_HPP
+#endif // TGU_ROBOCORE_2027_SHOOTER_HPP

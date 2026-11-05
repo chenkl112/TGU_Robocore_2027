@@ -1,0 +1,190 @@
+include_guard(GLOBAL)
+get_filename_component(ROBOCORE_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+
+# 顶层与独立测试入口都从这里声明生产库，避免测试复制一份源文件清单。
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+
+set(ROBOCORE_SANITIZER "none" CACHE STRING "none, address (with UBSan), or thread")
+set_property(CACHE ROBOCORE_SANITIZER PROPERTY STRINGS none address thread)
+# 保留独立测试原有的命令行选项，但检测器必须同时作用于被测生产库。
+if(DEFINED IO_SANITIZER AND NOT IO_SANITIZER STREQUAL "none")
+    if(NOT ROBOCORE_SANITIZER STREQUAL "none" AND NOT ROBOCORE_SANITIZER STREQUAL IO_SANITIZER)
+        message(FATAL_ERROR "IO_SANITIZER and ROBOCORE_SANITIZER select different sanitizers")
+    endif()
+    set(ROBOCORE_SANITIZER "${IO_SANITIZER}")
+endif()
+if(INFRA_ENABLE_TSAN)
+    if(NOT ROBOCORE_SANITIZER STREQUAL "none" AND NOT ROBOCORE_SANITIZER STREQUAL "thread")
+        message(FATAL_ERROR "INFRA_ENABLE_TSAN conflicts with ROBOCORE_SANITIZER")
+    endif()
+    set(ROBOCORE_SANITIZER "thread")
+endif()
+
+function(robocore_library target)
+    add_library(${target} STATIC ${ARGN})
+    target_include_directories(${target} PUBLIC
+        "${ROBOCORE_SOURCE_DIR}" "${ROBOCORE_SOURCE_DIR}/io"
+        "${ROBOCORE_SOURCE_DIR}/tools" "${ROBOCORE_SOURCE_DIR}/app/auto_aim")
+    target_link_libraries(${target} PUBLIC robocore_build_options)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
+function(robocore_add_targets)
+    cmake_parse_arguments(R "" "" "COMPONENTS" ${ARGN})
+    set(components ${R_COMPONENTS} base)
+    foreach(component IN LISTS components)
+        if(NOT component MATCHES "^(base|math|config|core|legacy|image|vision|serial|gimbal|camera|foxglove)$")
+            message(FATAL_ERROR "Unknown Robocore component: ${component}")
+        endif()
+    endforeach()
+    if("vision" IN_LIST components)
+        list(APPEND components core image config)
+    endif()
+    if("legacy" IN_LIST components)
+        list(APPEND components core)
+    endif()
+    if("core" IN_LIST components)
+        list(APPEND components math config)
+    endif()
+    if("gimbal" IN_LIST components)
+        list(APPEND components serial)
+    endif()
+
+    if(NOT TARGET robocore_build_options)
+        find_package(Threads REQUIRED)
+        include(CheckCXXSourceCompiles)
+        check_cxx_source_compiles("#include <format>\nint main() { return std::format(\"{}\", 42).empty(); }"
+            ROBOCORE_HAS_STD_FORMAT)
+        if(NOT ROBOCORE_HAS_STD_FORMAT)
+            message(FATAL_ERROR "Robocore requires C++20 std::format, for example GCC 13+ with libstdc++ 13+.")
+        endif()
+        add_library(robocore_build_options INTERFACE)
+        target_compile_features(robocore_build_options INTERFACE cxx_std_20)
+        if(ROBOCORE_SANITIZER STREQUAL "address")
+            set(sanitizer_flags -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g)
+        elseif(ROBOCORE_SANITIZER STREQUAL "thread")
+            set(sanitizer_flags -fsanitize=thread -fno-omit-frame-pointer -g)
+        elseif(NOT ROBOCORE_SANITIZER STREQUAL "none")
+            message(FATAL_ERROR "ROBOCORE_SANITIZER must be none, address, or thread")
+        endif()
+        if(sanitizer_flags)
+            if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" OR WIN32)
+                message(FATAL_ERROR "Sanitizers require GCC or Clang on a supported Unix platform")
+            endif()
+            target_compile_options(robocore_build_options INTERFACE ${sanitizer_flags})
+            target_link_options(robocore_build_options INTERFACE ${sanitizer_flags})
+        endif()
+        robocore_library(robocore_base "${ROBOCORE_SOURCE_DIR}/tools/logger.cpp"
+            "${ROBOCORE_SOURCE_DIR}/tools/crc.cpp")
+        target_link_libraries(robocore_base PUBLIC Threads::Threads)
+        # 旧调用方可以继续链接聚合目标；算法库直接依赖下方较窄的组件。
+        add_library(tools INTERFACE)
+        target_link_libraries(tools INTERFACE robocore_base)
+        add_library(auto_aim INTERFACE)
+        add_library(io INTERFACE)
+    endif()
+
+    if("math" IN_LIST components AND NOT TARGET robocore_math)
+        find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+        find_package(OpenCV REQUIRED COMPONENTS core)
+        robocore_library(robocore_math "${ROBOCORE_SOURCE_DIR}/tools/math_tools.cpp"
+            "${ROBOCORE_SOURCE_DIR}/tools/extended_kalman_filter.cpp"
+            "${ROBOCORE_SOURCE_DIR}/tools/trajectory.cpp")
+        target_link_libraries(robocore_math PUBLIC robocore_base Eigen3::Eigen opencv_core)
+        target_link_libraries(tools INTERFACE robocore_math)
+    endif()
+    if("config" IN_LIST components AND NOT TARGET robocore_config)
+        find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+        robocore_library(robocore_config "${ROBOCORE_SOURCE_DIR}/app/auto_aim/config.cpp")
+        target_link_libraries(robocore_config PUBLIC Eigen3::Eigen)
+    endif()
+    if("core" IN_LIST components AND NOT TARGET auto_aim_core)
+        find_package(OpenCV REQUIRED COMPONENTS core calib3d imgproc)
+        if(NOT TARGET tinympcstatic)
+            add_subdirectory("${ROBOCORE_SOURCE_DIR}/app/auto_aim/planner/tinympc"
+                "${CMAKE_BINARY_DIR}/robocore/tinympc")
+            target_link_libraries(tinympcstatic PUBLIC robocore_build_options)
+        endif()
+        robocore_library(auto_aim_core
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/armor.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/armor_geometry.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/solver.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/target.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/tracker.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/voter.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/planner/planner.cpp")
+        target_link_libraries(auto_aim_core PUBLIC robocore_config robocore_math
+            tinympcstatic opencv_core opencv_calib3d opencv_imgproc)
+        target_link_libraries(auto_aim INTERFACE auto_aim_core)
+    endif()
+    if("legacy" IN_LIST components AND NOT TARGET auto_aim_legacy)
+        robocore_library(auto_aim_legacy "${ROBOCORE_SOURCE_DIR}/app/auto_aim/aimer.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/shooter.cpp")
+        target_link_libraries(auto_aim_legacy PUBLIC auto_aim_core)
+        target_link_libraries(auto_aim INTERFACE auto_aim_legacy)
+    endif()
+    if("image" IN_LIST components AND NOT TARGET robocore_image)
+        find_package(OpenCV REQUIRED COMPONENTS core imgproc)
+        robocore_library(robocore_image "${ROBOCORE_SOURCE_DIR}/tools/img_tools.cpp")
+        target_link_libraries(robocore_image PUBLIC robocore_base opencv_core opencv_imgproc)
+        target_link_libraries(tools INTERFACE robocore_image)
+    endif()
+    if("vision" IN_LIST components AND NOT TARGET auto_aim_vision)
+        find_package(OpenCV REQUIRED COMPONENTS core imgproc calib3d dnn highgui imgcodecs videoio)
+        # 显式 OpenVINO_DIR 优先，其次采用 README 的项目内 Python 虚拟环境。
+        if(NOT OpenVINO_DIR)
+            file(GLOB openvino_packages LIST_DIRECTORIES true
+                "${ROBOCORE_SOURCE_DIR}/.venv-openvino/lib/python*/site-packages/openvino/cmake")
+            list(LENGTH openvino_packages package_count)
+            if(package_count EQUAL 1)
+                list(GET openvino_packages 0 package_dir)
+                set(OpenVINO_DIR "${package_dir}" CACHE PATH "OpenVINO CMake package")
+            endif()
+        endif()
+        find_package(OpenVINO REQUIRED COMPONENTS Runtime)
+        robocore_library(auto_aim_vision
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/classifier.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/detector.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/yolo.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/pipeline.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/yolos/yolov8.cpp"
+            "${ROBOCORE_SOURCE_DIR}/app/auto_aim/multithread/mt_yolo.cpp")
+        target_link_libraries(auto_aim_vision PUBLIC auto_aim_core robocore_image
+            openvino::runtime opencv_dnn opencv_highgui opencv_imgcodecs opencv_videoio)
+        target_link_libraries(auto_aim INTERFACE auto_aim_vision)
+    endif()
+    if("serial" IN_LIST components AND NOT TARGET robocore_serial)
+        find_package(Boost 1.69 REQUIRED)
+        robocore_library(robocore_serial "${ROBOCORE_SOURCE_DIR}/io/serial/serial.cpp")
+        target_link_libraries(robocore_serial PUBLIC robocore_base Boost::boost)
+        target_link_libraries(io INTERFACE robocore_serial)
+    endif()
+    if("gimbal" IN_LIST components AND NOT TARGET robocore_gimbal)
+        find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+        robocore_library(robocore_gimbal "${ROBOCORE_SOURCE_DIR}/io/gimbal/gimbal.cpp")
+        target_link_libraries(robocore_gimbal PUBLIC robocore_serial Eigen3::Eigen)
+        target_link_libraries(io INTERFACE robocore_gimbal)
+    endif()
+    if("camera" IN_LIST components AND NOT TARGET robocore_camera)
+        find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio)
+        robocore_library(robocore_camera "${ROBOCORE_SOURCE_DIR}/io/usbcamera/usbcamera.cpp")
+        target_link_libraries(robocore_camera PUBLIC robocore_base opencv_core opencv_imgproc opencv_videoio)
+        target_link_libraries(io INTERFACE robocore_camera)
+    endif()
+    if("foxglove" IN_LIST components AND NOT TARGET robocore_foxglove)
+        robocore_library(robocore_foxglove "${ROBOCORE_SOURCE_DIR}/tools/foxglove_comm.cpp")
+        target_include_directories(robocore_foxglove PUBLIC
+            "${ROBOCORE_SOURCE_DIR}/tools/foxglove/include"
+            "${ROBOCORE_SOURCE_DIR}/tools/foxglove/include/foxglove-c")
+        target_link_libraries(robocore_foxglove PUBLIC robocore_base
+            "${ROBOCORE_SOURCE_DIR}/tools/foxglove/lib/libfoxglove.a")
+        target_link_libraries(tools INTERFACE robocore_foxglove)
+    endif()
+endfunction()

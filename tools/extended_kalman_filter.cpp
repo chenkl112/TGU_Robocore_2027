@@ -23,9 +23,9 @@ Eigen::VectorXd ExtendedKalmanFilter::predict(const Eigen::MatrixXd& F, const Ei
     return predict(F, Q, [&](const Eigen::VectorXd& x) { return F * x; });
 }
 
-Eigen::VectorXd ExtendedKalmanFilter::predict(
-    const Eigen::MatrixXd& F, const Eigen::MatrixXd& Q,
-    std::function<Eigen::VectorXd(const Eigen::VectorXd&)> f) {
+Eigen::VectorXd
+ExtendedKalmanFilter::predict(const Eigen::MatrixXd& F, const Eigen::MatrixXd& Q,
+                              std::function<Eigen::VectorXd(const Eigen::VectorXd&)> f) {
     P = F * P * F.transpose() + Q;
     x = f(x);
     return x;
@@ -51,15 +51,13 @@ Eigen::VectorXd ExtendedKalmanFilter::update(
     P = (I - K * H) * P * (I - K * H).transpose() + K * R * K.transpose();
 
     const double nis = innovation.dot(s_ldlt.solve(innovation));
-    constexpr double nis_threshold = 9.4877;  // chi-square, dof=4, 95%
+    constexpr double nis_threshold = 9.4877; // 四维观测的卡方检验，置信度 95%
 
     data["nis_fail"] = 0;
     data["nees_fail"] = 0;
     if (nis > nis_threshold) {
-        ++nis_count_;
         data["nis_fail"] = 1;
     }
-    total_count_++;
     last_nis = nis;
 
     recent_nis_failures.push_back(nis > nis_threshold ? 1 : 0);
@@ -70,8 +68,7 @@ Eigen::VectorXd ExtendedKalmanFilter::update(
 
     int recent_failures =
         std::accumulate(recent_nis_failures.begin(), recent_nis_failures.end(), 0);
-    double recent_rate =
-        static_cast<double>(recent_failures) / recent_nis_failures.size();
+    double recent_rate = static_cast<double>(recent_failures) / recent_nis_failures.size();
 
     data["residual_yaw"] = innovation[0];
     data["residual_pitch"] = innovation[1];
@@ -84,4 +81,4 @@ Eigen::VectorXd ExtendedKalmanFilter::update(
     return x;
 }
 
-}  // namespace tools
+} // namespace tools

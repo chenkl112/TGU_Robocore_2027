@@ -14,4 +14,4 @@
 #include "voter.hpp"
 #include "yolo.hpp"
 
-#endif  // TGU_ROBOCORE_2027_AUTO_AIM_HPP
+#endif // TGU_ROBOCORE_2027_AUTO_AIM_HPP
